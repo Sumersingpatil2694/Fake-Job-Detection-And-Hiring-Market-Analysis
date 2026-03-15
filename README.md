@@ -1,8 +1,8 @@
-# 🛡️ Fake Job Detection – End-to-End Data Science Project
+# 🛡️ AI Based Fake Job Detection – Resume-Analyzer
 
 [![Python](https://img.shields.io/badge/Python-3.9%2B-blue)](https://python.org)
 [![Scikit-learn](https://img.shields.io/badge/Scikit--learn-ML-orange)](https://scikit-learn.org)
-[![Streamlit]([https://img.shields.io/badge/Streamlit-App-red](https://ai-based-fake-job-detection-resume-analyzer.streamlit.app/)](https://streamlit.io)
+[![Streamlit](https://img.shields.io/badge/Streamlit-App-red)](https://ai-based-fake-job-detection-resume-analyzer.streamlit.app/)
 [![AUC](https://img.shields.io/badge/AUC--ROC-0.984-brightgreen)]()
 [![MySQL](https://img.shields.io/badge/MySQL-8.0%2B-blue)](https://mysql.com)
 
