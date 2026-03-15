@@ -799,7 +799,7 @@ if page == "🏠  Home":
     st.markdown("""
     <div style='text-align:center; padding:20px 0 10px'>
         <h1 style='font-size:2.5rem; font-weight:800; color:#e6edf3'>
-            🛡️ Fake Job Detection System
+            🛡️ Fake Job Detection And Resume-Analyzer
         </h1>
         <p style='color:#8b949e; font-size:1rem'>
             End-to-End NLP + ML + Gemini AI · 
