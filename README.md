@@ -202,10 +202,14 @@ streamlit run streamlit_app.py
 
 ---
 
-## 📧 Contact
+## 📞 Contact
 
-**Sumersing Patil**
-🎓 B.Tech (AI) – GH Raisoni Institute of Engineering & Business Management, Jalgaon
-💼 Data Analyst | Python Developer | ML Enthusiast
+### Developer Information
+
+**Sumersung Patil**
+- 🐙 GitHub: [Sumersingpatil2694](https://github.com/Sumersingpatil2694)
+- 💼 LinkedIn: [Sumersing Patil](linkedin.com/in/sumersing-patil-839674234)
+- 📧 Email: sumerrajput0193@gmail.com
+- 🐦 Twitter: [X](https://x.com/SumerRajput2694)
 
 ---
