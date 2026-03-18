@@ -371,21 +371,16 @@ def score_label(score: float) -> str:
 
 # RESUME FUNCTIONS
 def _extract_pdf_pdfplumber(raw_bytes: bytes) -> str:
-    """Extract text from PDF using pdfplumber with per-page error handling."""
-    import warnings
     text_parts = []
     try:
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            with pdfplumber.open(io.BytesIO(raw_bytes)) as pdf:
-                for i, page in enumerate(pdf.pages):
-                    try:
-                        t = page.extract_text(x_tolerance=3, y_tolerance=3)
-                        if t:
-                            text_parts.append(t)
-                    except Exception:
-                        # Skip problematic pages silently
-                        continue
+        with pdfplumber.open(io.BytesIO(raw_bytes)) as pdf:
+            for page in pdf.pages:
+                try:
+                    t = page.extract_text()
+                    if t:
+                        text_parts.append(t)
+                except Exception:
+                    continue
     except Exception:
         return ""
     return "\n".join(text_parts)
@@ -414,7 +409,7 @@ def extract_text_from_file(uploaded_file) -> str:
     if uploaded_file is None:
         return ""
     fname = uploaded_file.name.lower()
-    raw_bytes = uploaded_file.read()
+    raw_bytes = uploaded_file.getvalue()
 
     # ── Guard against excessively large files (> 20 MB) ──
     if len(raw_bytes) > 20 * 1024 * 1024:
