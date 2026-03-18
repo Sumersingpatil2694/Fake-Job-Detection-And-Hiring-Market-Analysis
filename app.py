@@ -596,34 +596,77 @@ def compute_shortlisting_score(skills_score: float, ats_score: float,
 
 
 # DATA & MODEL LOADERS
+# DATA LOADER (Google Sheets + Local Fallback)
 @st.cache_data(show_spinner=False)
 def load_data():
-    paths = [
-        "outputs/cleaned_job_postings.csv",
-        "cleaned_job_postings.csv",
-        "Fake Job Postings.csv",
-    ]
-    for p in paths:
-        if os.path.exists(p):
-            df = pd.read_csv(p)
-            if 'has_salary' not in df.columns:
-                df['has_salary']          = df['salary_range'].notna().astype(int)
-                df['has_company_profile'] = df['company_profile'].notna().astype(int)
-                df['has_requirements']    = df['requirements'].notna().astype(int)
-                df['has_benefits']        = df['benefits'].notna().astype(int)
-                df['has_urgency_words']   = (
-                    df['title'].fillna('') + ' ' + df['description'].fillna('')
-                ).apply(has_urgency)
-                df['desc_length'] = df['description'].apply(
-                    lambda x: len(str(x)) if pd.notna(x) else 0)
-                df['profile_completeness'] = (
-                    df['has_salary'] + df['has_company_profile'] +
-                    df['has_requirements'] + df['has_benefits'] +
-                    df['has_company_logo'].fillna(0).astype(int))
-                df['country'] = df['location'].apply(
-                    lambda x: str(x).split(',')[0].strip() if pd.notna(x) else 'Unknown')
-            return df
-    return None
+
+    # 🔥 Google Sheets CSV Link (PRIMARY)
+    drive_url = "https://docs.google.com/spreadsheets/d/1vSLgt9OvinKzrGB_qAaRV6S85MKHpq5YyHqIdCsE81Y/export?format=csv"
+
+    # ==============================
+    # 1️⃣ Try Google Sheets First
+    # ==============================
+    try:
+        with st.spinner("📡 Loading dataset from Google Drive..."):
+            df = pd.read_csv(drive_url)
+
+        st.success("✅ Data loaded from Google Sheets")
+
+    except Exception as e:
+        st.warning("⚠️ Google Sheets load failed, trying local files...")
+
+        # ==============================
+        # 2️⃣ Local Fallback
+        # ==============================
+        paths = [
+            "outputs/cleaned_job_postings.csv",
+            "cleaned_job_postings.csv",
+            "Fake Job Postings.csv",
+        ]
+
+        df = None
+        for p in paths:
+            if os.path.exists(p):
+                df = pd.read_csv(p)
+                st.info(f"📂 Loaded from local file: {p}")
+                break
+
+        if df is None:
+            st.error("❌ No dataset found!")
+            return None
+
+    # ==============================
+    # 3️⃣ Feature Engineering (SAFE)
+    # ==============================
+    if 'has_salary' not in df.columns:
+
+        df['has_salary']          = df['salary_range'].notna().astype(int)
+        df['has_company_profile'] = df['company_profile'].notna().astype(int)
+        df['has_requirements']    = df['requirements'].notna().astype(int)
+        df['has_benefits']        = df['benefits'].notna().astype(int)
+
+        df['has_urgency_words'] = (
+            df['title'].fillna('') + ' ' + df['description'].fillna('')
+        ).apply(has_urgency)
+
+        df['desc_length'] = df['description'].apply(
+            lambda x: len(str(x)) if pd.notna(x) else 0
+        )
+
+        df['profile_completeness'] = (
+            df['has_salary'] + df['has_company_profile'] +
+            df['has_requirements'] + df['has_benefits'] +
+            df['has_company_logo'].fillna(0).astype(int)
+        )
+
+        df['country'] = df['location'].apply(
+            lambda x: str(x).split(',')[0].strip() if pd.notna(x) else 'Unknown'
+        )
+
+        st.info("⚙️ Feature engineering applied on raw dataset")
+
+    return df
+    
 
 @st.cache_resource(show_spinner=False)
 def load_models():
