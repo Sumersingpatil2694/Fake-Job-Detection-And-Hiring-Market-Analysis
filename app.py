@@ -610,7 +610,7 @@ def load_data():
         with st.spinner("📡 Loading dataset from Google Drive..."):
             df = pd.read_csv(drive_url)
 
-        st.success("✅ Data loaded from Google Sheets")
+        st.success("✅ Dataset loaded successfully")
 
     except Exception as e:
         st.warning("⚠️ Google Sheets load failed, trying local files...")
