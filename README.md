@@ -7,9 +7,6 @@
 [![MySQL](https://img.shields.io/badge/MySQL-8.0%2B-blue)](https://mysql.com)
 
 > **Detect fraudulent job postings using NLP + Machine Learning + MySQL Analytics**
->
-> Built by **Sumersing Patil** | B.Tech (AI) | Data Analyst Portfolio Project
-
 ---
 
 ## 📋 Project Overview
