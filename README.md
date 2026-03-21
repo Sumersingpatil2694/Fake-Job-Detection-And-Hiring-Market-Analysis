@@ -96,7 +96,7 @@ Fake_Job_Detection/
 | Missing Company Profile              | 15.2%     | **66.8%**   | ✅ Strong        |
 | Contains Urgency Words               | 2.3%      | **18.7%**   | ✅ Strong        |
 | Avg Description Length               | 1,890 chars | **857 chars** | ✅ Medium      |
-| Profile Completeness (avg / 6)       | 2.8       | **1.6**     | ✅ Strong        |
+
 
 ---
 
