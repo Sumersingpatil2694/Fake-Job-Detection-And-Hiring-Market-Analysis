@@ -18,7 +18,7 @@ warnings.filterwarnings("ignore")
 
 import pandas as pd
 
-# ── Try MySQL imports (graceful degradation) ──────────────────────────────
+# ──  MySQL imports  ──────
 try:
     import mysql.connector
     from mysql.connector import Error as MySQLError
@@ -32,7 +32,7 @@ try:
 except ImportError:
     SQLALCHEMY_AVAILABLE = False
 
-# ── Try Streamlit (only when running inside Streamlit app) ────────────────
+# ──  Streamlit (only when running inside Streamlit app) ────────────────
 try:
     import streamlit as st
     STREAMLIT_AVAILABLE = True
