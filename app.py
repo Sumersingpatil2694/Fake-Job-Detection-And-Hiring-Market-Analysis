@@ -49,7 +49,7 @@ try:
 except ImportError:
     DOCX_SUPPORT = False
 
-# ── Optional: DB logging ───────────────────────────────────────────────────
+# ── Optional: DB logging ────
 try:
     from db_connection import log_prediction, get_prediction_history, get_history_stats, test_connection
     DB_AVAILABLE = True
