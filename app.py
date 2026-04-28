@@ -656,7 +656,7 @@ def compute_shortlisting_score(skills_score: float, ats_score: float,
 def load_data():
 
     # 🔥 Google Sheets CSV Link (PRIMARY)
-    drive_url = "https://docs.google.com/spreadsheets/d/1vSLgt9OvinKzrGB_qAaRV6S85MKHpq5YyHqIdCsE81Y/export?format=csv"
+    drive_url = "https://drive.google.com/file/d/1Xukv4uTqkc5X3kx2telOroSEzRH5fIgO/view?usp=drive_link"
 
     # ==============================
     # 1️⃣ Try Google Sheets First
