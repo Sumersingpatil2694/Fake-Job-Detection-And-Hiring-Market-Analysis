@@ -37,7 +37,7 @@ CREATE TABLE job_postings (
     required_experience    VARCHAR(100),
     required_education     VARCHAR(100),
     industry               VARCHAR(200),
-    `function`             VARCHAR(200),     -- backticks: 'function' is reserved in MySQL
+    `function`             VARCHAR(200),  -- backticks: 'function' is reserved in MySQL
 
     -- Original Text Fields (LONGTEXT for large job descriptions)
     company_profile        LONGTEXT,
