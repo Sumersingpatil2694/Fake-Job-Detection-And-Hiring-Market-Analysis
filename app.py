@@ -17,21 +17,21 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.metrics import precision_recall_curve, roc_curve, auc
 
-# ── Optional: Gemini AI ────────────────────────────────────────────────────
+# ── Optional: Gemini AI ─
 try:
     import google.generativeai as genai
     GEMINI_AVAILABLE = True
 except ImportError:
     GEMINI_AVAILABLE = False
 
-# ── Optional: PDF / DOCX ───────────────────────────────────────────────────
+# ── Optional: PDF / DOCX 
 try:
     import pdfplumber
     PDF_SUPPORT = True
 except ImportError:
     PDF_SUPPORT = False
 
-# ── Optional: pypdfium2 fallback ──────────────────────────────────────────
+# ── Optional: pypdfium2 fallback ─
 try:
     import pypdfium2 as pdfium
     PDFIUM_SUPPORT = True
@@ -49,7 +49,7 @@ try:
 except ImportError:
     DOCX_SUPPORT = False
 
-# ── Optional: DB logging ───────────────────────────────────────────────────
+# ── Optional: DB logging ─
 try:
     from db_connection import log_prediction, get_prediction_history, get_history_stats, test_connection
     DB_AVAILABLE = True
