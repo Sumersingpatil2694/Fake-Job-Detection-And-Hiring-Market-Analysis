@@ -217,12 +217,12 @@ def get_gemini_model():
         return None, False
 
     api_key = None
-    # 1. Streamlit secrets
+    # 1. Streamlit secrets ---
     try:
         api_key = st.secrets["gemini"]["api_key"]
     except Exception:
         pass
-    # 2. Environment variable
+    # 2. Environment variable ---
     if not api_key:
         api_key = os.environ.get("GEMINI_API_KEY", "")
     # 3. Session state (from sidebar input)
