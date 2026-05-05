@@ -31,14 +31,14 @@ try:
 except ImportError:
     PDF_SUPPORT = False
 
-# ── Optional: pypdfium2 fallback ─
+# ── Optional: pypdfium2 fallback ─--
 try:
     import pypdfium2 as pdfium
     PDFIUM_SUPPORT = True
 except ImportError:
     PDFIUM_SUPPORT = False
 
-# Suppress noisy PDF font warnings globally
+# Suppress noisy PDF font warnings globally---
 import logging
 logging.getLogger("pdfminer").setLevel(logging.ERROR)
 logging.getLogger("pdfplumber").setLevel(logging.ERROR)
