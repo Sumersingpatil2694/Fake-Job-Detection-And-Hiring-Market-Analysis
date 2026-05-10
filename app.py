@@ -17,7 +17,7 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.metrics import precision_recall_curve, roc_curve, auc
 
-# ── Optional: Gemini AI ─
+# --- Optional: Gemini AI ---
 try:
     import google.generativeai as genai
     GEMINI_AVAILABLE = True
