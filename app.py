@@ -64,7 +64,7 @@ st.set_page_config(
     initial_sidebar_state = "expanded",
 )
 
-# CUSTOM CSS
+#---- CUSTOM CSS ---
 st.markdown("""
 <style>
     .main                { background-color: #0d1117; }
