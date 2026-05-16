@@ -690,9 +690,7 @@ def load_data():
             st.error("❌ No dataset found!")
             return None
 
-    # ==============================
     # 3️⃣ Feature Engineering (SAFE)
-    # ==============================
     if 'has_salary' not in df.columns:
 
         df['has_salary']          = df['salary_range'].notna().astype(int)
