@@ -18,7 +18,7 @@ warnings.filterwarnings("ignore")
 
 import pandas as pd
 
-# ──  MySQL imports  ──────
+# ─  MySQL imports  ──
 try:
     import mysql.connector
     from mysql.connector import Error as MySQLError
