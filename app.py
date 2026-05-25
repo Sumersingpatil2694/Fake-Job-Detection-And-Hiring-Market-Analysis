@@ -24,7 +24,7 @@ try:
 except ImportError:
     GEMINI_AVAILABLE = False
 
-# ── Optional: PDF / DOCX ---
+# -- Optional: PDF / DOCX --
 try:
     import pdfplumber
     PDF_SUPPORT = True
