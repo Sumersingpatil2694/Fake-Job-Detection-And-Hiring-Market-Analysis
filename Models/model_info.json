@@ -1,0 +1,33 @@
+{
+  "best_model": "Logistic Regression",
+  "threshold": 0.35,
+  "precision": 0.6557,
+  "recall": 0.9249,
+  "f1_score": 0.7674,
+  "accuracy": 0.9729,
+  "auc_roc": 0.9927,
+  "cv_mean_f1": 0.982,
+  "cv_std_f1": 0.0024,
+  "cv_note": "CV on SMOTE-balanced training set \u2014 test F1=0.7626 is real-world metric",
+  "total_records": 17880,
+  "train_samples": 14304,
+  "test_samples": 3576,
+  "smote_applied": true,
+  "fraud_rate_pct": 4.84,
+  "tfidf_features": 5000,
+  "numeric_features": 10,
+  "numeric_features_list": [
+    "has_salary",
+    "has_company_profile",
+    "has_requirements",
+    "has_benefits",
+    "has_company_logo",
+    "has_questions",
+    "telecommuting",
+    "has_urgency_words",
+    "profile_completeness",
+    "desc_length"
+  ],
+  "trained_on": "2026-05-27T15:52:14Z",
+  "notebook_version": "v3.1-fixed"
+}
