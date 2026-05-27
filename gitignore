@@ -1,0 +1,17 @@
+# ── Sensitive credentials — NEVER commit ──
+.env
+
+# ── Model artifacts (large binary files) ──
+*.pkl
+models/
+outputs/
+
+# ── Python cache ──
+__pycache__/
+*.pyc
+*.pyo
+.ipynb_checkpoints/
+
+# ── OS files ──
+.DS_Store
+Thumbs.db
