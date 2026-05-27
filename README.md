@@ -653,7 +653,7 @@ Cached data loaders (5-minute TTL) for the dataset and SQL views.
 ![Home Page](https://github.com/Sumersingpatil2694/Fake-Job-Detection-And-Hiring-Market-Analysis/blob/main/Screenshots/Home%20page.png)
 
 ### 📊 EDA Dashboard
-![EDA Dashboard](screenshots/eda.png)
+![EDA Dashboard](https://github.com/Sumersingpatil2694/Fake-Job-Detection-And-Hiring-Market-Analysis/blob/main/Screenshots/EDA%20Dashboards.png)
 
 ### 🔍 Job Checker (Main Feature)
 ![Job Checker](screenshots/job_checker.png)
