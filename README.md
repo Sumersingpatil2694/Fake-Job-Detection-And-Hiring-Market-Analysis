@@ -98,7 +98,6 @@ The notebook trains and exports the ML pipeline → the clean CSV is loaded into
 - **Scikit-learn** — TF-IDF, Logistic Regression, Random Forest, evaluation
 - **Imbalanced-learn (SMOTE)** — Class balancing for ~5% fraud rate
 - **SHAP** — Model explainability
-- **WordCloud** — Text visualization
 - **Pickle** — Model serialization
 
 ### Frontend
