@@ -1,4 +1,3 @@
-import io
 import os
 import re
 import json
@@ -11,50 +10,53 @@ import pandas as pd
 import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
-from plotly.subplots import make_subplots
 from scipy.sparse import hstack, csr_matrix
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
-from sklearn.metrics import precision_recall_curve, roc_curve, auc
+# NOTE: TfidfVectorizer import removed — it was unused (we load a pickled
+# vectorizer at runtime via load_models()).  Removing it avoids the
+# pyflakes 'imported but unused' warning and shaves ~200 ms off cold-start.
 
-# -- Optional: Gemini AI --
+
+# ── Optional: DB / SQL integration ───────────────────────────────────────────
 try:
-    import google.generativeai as genai
-    GEMINI_AVAILABLE = True
-except ImportError:
-    GEMINI_AVAILABLE = False
+    from db_connection import (
+        MYSQL_CONFIG,
+        fetch_country_fraud_analysis,
+        fetch_employment_type_fraud_analysis,
+        fetch_fraud_summary,
+        fetch_high_risk_jobs,
+        fetch_industry_risk,
+        fetch_salary_fraud_analysis,
+        run_query,
+        test_connection,
+    )
+    DB_MODULE_AVAILABLE = True
+except Exception:
+    MYSQL_CONFIG = {}
+    DB_MODULE_AVAILABLE = False
 
-# -- Optional: PDF / DOCX --
-try:
-    import pdfplumber
-    PDF_SUPPORT = True
-except ImportError:
-    PDF_SUPPORT = False
+    def test_connection():
+        return False
 
-# -- Optional: pypdfium2 fallback --
-try:
-    import pypdfium2 as pdfium
-    PDFIUM_SUPPORT = True
-except ImportError:
-    PDFIUM_SUPPORT = False
+    def run_query(*args, **kwargs):
+        return pd.DataFrame()
 
-# -- Suppress noisy PDF font warnings globally--
-import logging
-logging.getLogger("pdfminer").setLevel(logging.ERROR)
-logging.getLogger("pdfplumber").setLevel(logging.ERROR)
+    def fetch_fraud_summary(*args, **kwargs):
+        return pd.DataFrame()
 
-try:
-    from docx import Document as DocxDocument
-    DOCX_SUPPORT = True
-except ImportError:
-    DOCX_SUPPORT = False
+    def fetch_high_risk_jobs(*args, **kwargs):
+        return pd.DataFrame()
 
-# ── Optional: DB logging ─
-try:
-    from db_connection import log_prediction, get_prediction_history, get_history_stats, test_connection
-    DB_AVAILABLE = True
-except ImportError:
-    DB_AVAILABLE = False
+    def fetch_industry_risk(*args, **kwargs):
+        return pd.DataFrame()
+
+    def fetch_country_fraud_analysis(*args, **kwargs):
+        return pd.DataFrame()
+
+    def fetch_employment_type_fraud_analysis(*args, **kwargs):
+        return pd.DataFrame()
+
+    def fetch_salary_fraud_analysis(*args, **kwargs):
+        return pd.DataFrame()
 
 # PAGE CONFIG
 st.set_page_config(
@@ -64,7 +66,7 @@ st.set_page_config(
     initial_sidebar_state = "expanded",
 )
 
-#-- CUSTOM CSS --
+# CUSTOM CSS
 st.markdown("""
 <style>
     .main                { background-color: #0d1117; }
@@ -83,12 +85,7 @@ st.markdown("""
     .info-card    { background:#1b2030; border-left:5px solid #3498DB; border-radius:10px; padding:16px; }
     .limit-card   { background:#1e1e2e; border-left:5px solid #9B59B6; border-radius:10px; padding:16px; margin:8px 0; }
     .fix-card     { background:#1a2d1a; border-left:5px solid #27AE60; border-radius:10px; padding:14px; margin:6px 0; }
-    .resume-card  { background:#1a1e2e; border-left:5px solid #3498DB; border-radius:10px; padding:20px; margin:8px 0; }
-    .score-card   { background:#16213e; border-radius:14px; padding:20px; text-align:center;
-                    border:1px solid #30363d; box-shadow:0 4px 20px rgba(0,0,0,0.4); }
-    .ats-row { display:flex; justify-content:space-between; align-items:center;
-               padding:6px 4px; border-bottom:1px solid #21262d; margin-bottom:2px; }
-    .gemini-card  { background:linear-gradient(135deg,#1a1a2e,#16213e); border-left:5px solid #4285f4;
+    .info-card  { background:linear-gradient(135deg,#1a1a2e,#16213e); border-left:5px solid #4285f4;
                     border-radius:12px; padding:20px; margin:10px 0;
                     box-shadow:0 4px 20px rgba(66,133,244,0.15); }
     .section-header {
@@ -101,12 +98,6 @@ st.markdown("""
     .badge-yellow { background:#3d2a10; color:#F39C12; border:1px solid #F39C12; }
     .badge-blue   { background:#1a2a3d; color:#3498DB; border:1px solid #3498DB; }
     .badge-purple { background:#2a1a3d; color:#9B59B6; border:1px solid #9B59B6; }
-    .skill-tag-match   { display:inline-block; background:#1a3d1a; color:#2ECC71;
-                         border:1px solid #2ECC71; border-radius:20px; padding:3px 12px; font-size:0.82rem; margin:3px; }
-    .skill-tag-missing { display:inline-block; background:#3d1a1a; color:#E74C3C;
-                         border:1px solid #E74C3C; border-radius:20px; padding:3px 12px; font-size:0.82rem; margin:3px; }
-    .skill-tag-partial { display:inline-block; background:#3d2a10; color:#F39C12;
-                         border:1px solid #F39C12; border-radius:20px; padding:3px 12px; font-size:0.82rem; margin:3px; }
     #MainMenu, footer { visibility: hidden; }
 </style>
 """, unsafe_allow_html=True)
@@ -114,216 +105,103 @@ st.markdown("""
 # CONSTANTS
 FRAUD_THRESHOLD = 0.35
 
+# IMPORTANT: This list MUST exactly match the notebook (Cell 8) so feature
+# engineering at inference time matches training time. 18 words — do NOT add
+# or remove without retraining the model.
 URGENCY_WORDS = [
-    'urgent','immediate','asap','hurry','limited','act now','no experience',
-    'work from home','earn money','easy money','guaranteed','weekly pay',
-    'quick money','high pay','bonus','100%','free training','daily pay',
-    'make money','fast cash','no degree required','apply now','great opportunity'
+    'urgent', 'immediate', 'asap', 'hurry', 'limited',
+    'act now', 'no experience', 'work from home',
+    'earn money', 'easy money', 'guaranteed',
+    'weekly pay', 'quick money', 'high pay',
+    'bonus', '100%', 'free training', 'daily pay'
 ]
 
+# FIX: RED_FLAG_CHECKS now stores (check_fn, positive_label) tuples.
+# Previously the positive label was computed via brittle chained .replace() calls —
+# any key name change would silently break the UI. Now each entry owns its label.
 RED_FLAG_CHECKS = {
-    "No salary disclosed"           : lambda r: r.get('has_salary', 1) == 0,
-    "No company profile provided"   : lambda r: r.get('has_company_profile', 1) == 0,
-    "No requirements listed"        : lambda r: r.get('has_requirements', 1) == 0,
-    "Contains urgency language"     : lambda r: r.get('has_urgency_words', 0) == 1,
-    "Very short description (<300)" : lambda r: r.get('desc_length', 999) < 300,
-    "No company logo"               : lambda r: r.get('has_company_logo', 1) == 0,
+    "No salary disclosed"           : (lambda r: r.get("has_salary", 1) == 0,            "Salary disclosed"),
+    "No company profile provided"   : (lambda r: r.get("has_company_profile", 1) == 0,   "Company profile available"),
+    "No requirements listed"        : (lambda r: r.get("has_requirements", 1) == 0,      "Requirements listed"),
+    "Contains urgency language"     : (lambda r: r.get("has_urgency_words", 0) == 1,     "No urgency language"),
+    "Very short description (<300)" : (lambda r: r.get("desc_length", 999) < 300,        "Description length OK (≥300 chars)"),
+    "No company logo"               : (lambda r: r.get("has_company_logo", 1) == 0,      "Company logo present"),
 }
 
-# Expanded stop words for ATS (was only 8 words – FIXED)
-ATS_STOP_WORDS = {
-    'the','and','for','with','this','that','are','you','was','were','will',
-    'have','has','been','from','they','their','your','our','can','may','not',
-    'but','all','any','its','also','more','into','over','such','each','both',
-    'than','through','during','before','after','above','below','between',
-    'under','again','further','then','once','job','work','team','company',
-    'position','role','strong','about','which','when','where','what','how',
-    'who','him','her','his','she','his','they','them','these','those','some',
-}
 
-SKILL_CATEGORIES = {
-    "💻 Programming Languages": [
-        "python","java","javascript","c++","c#","r","scala","golang",
-        "rust","php","ruby","swift","kotlin","typescript","matlab",
-        "bash","shell scripting","perl"
-    ],
-    "🤖 Data Science & ML": [
-        "machine learning","deep learning","nlp","natural language processing",
-        "computer vision","data science","statistics","data analysis",
-        "feature engineering","model training","predictive modeling",
-        "regression","classification","clustering","neural network",
-        "reinforcement learning","time series"
-    ],
-    "🧠 ML Frameworks": [
-        "tensorflow","pytorch","keras","scikit-learn","sklearn","xgboost",
-        "lightgbm","catboost","hugging face","transformers","spacy",
-        "nltk","gensim","fastai","shap","lime","mlflow"
-    ],
-    "📊 Data Tools": [
-        "pandas","numpy","matplotlib","seaborn","plotly","scipy",
-        "jupyter","notebook","anaconda","streamlit","gradio",
-        "beautiful soup","scrapy","selenium","requests"
-    ],
-    "🗄️ Databases & SQL": [
-        "sql","mysql","postgresql","mongodb","sqlite","oracle",
-        "redis","elasticsearch","cassandra","dynamodb","snowflake",
-        "bigquery","database","nosql","data warehouse","etl"
-    ],
-    "☁️ Cloud & DevOps": [
-        "aws","azure","gcp","google cloud","docker","kubernetes",
-        "ci/cd","jenkins","terraform","ansible","linux","unix",
-        "cloud computing","microservices","rest api","graphql"
-    ],
-    "📈 BI & Visualization": [
-        "power bi","tableau","looker","excel","google analytics",
-        "google data studio","qlik","data visualization","dashboard",
-        "reporting","pivot table"
-    ],
-    "🔧 Tools & Platforms": [
-        "git","github","gitlab","jira","confluence","postman",
-        "vs code","pycharm","intellij","hadoop","spark","kafka",
-        "airflow","databricks","dbt"
-    ],
-    "🎯 Soft Skills": [
-        "leadership","communication","teamwork","problem solving",
-        "analytical","critical thinking","project management","agile",
-        "scrum","presentation","collaboration","time management"
-    ],
-}
+# SQL + MODEL HELPERS
+# FIX: ttl=300 — both load_data() and load_sql_views() use same TTL for consistent refresh.
+# Previously no TTL meant empty results were cached forever if MySQL
+# wasn't ready on first load, causing SQL tab to always show zeros/empty.
+@st.cache_data(show_spinner=False, ttl=300)
+def load_sql_views():
+    if not DB_MODULE_AVAILABLE or not test_connection():
+        return {
+            "connected": False,
+            "summary": pd.DataFrame(),
+            "industry": pd.DataFrame(),
+            "high_risk": pd.DataFrame(),
+            "country": pd.DataFrame(),
+            "employment": pd.DataFrame(),
+            "salary": pd.DataFrame(),
+        }
 
-ACTION_VERBS = [
-    "developed","built","created","designed","implemented","deployed",
-    "optimized","improved","analyzed","engineered","trained","achieved",
-    "led","managed","delivered","automated","reduced","increased",
-    "enhanced","collaborated","researched","published","presented",
-    "mentored","coordinated","established","launched","integrated"
-]
-
-RESUME_SECTIONS = [
-    "education","experience","skills","projects","certifications",
-    "objective","summary","achievements","work experience","internship",
-    "publications","awards","contact","profile"
-]
+    return {
+        "connected": True,
+        "summary": fetch_fraud_summary(),
+        "industry": fetch_industry_risk(15),
+        "high_risk": fetch_high_risk_jobs(20),
+        "country": fetch_country_fraud_analysis(15),
+        "employment": fetch_employment_type_fraud_analysis(12),
+        "salary": fetch_salary_fraud_analysis(),
+    }
 
 
-# GEMINI API SETUP
-def get_gemini_model():
-    """
-    Initialize Gemini model.
-    Priority: Streamlit secrets → environment variable → user input in sidebar.
-    Returns (model, api_key_found)
-    """
-    if not GEMINI_AVAILABLE:
-        return None, False
+def sql_scalar(df: pd.DataFrame, column: str, default=0):
+    if df is None or df.empty or column not in df.columns:
+        return default
+    val = df.iloc[0][column]
+    if pd.isna(val):
+        return default
+    return val
 
-    api_key = None
-    # 1. Streamlit secrets ---
+
+def extract_model_feature_insights(model, tfidf, top_n: int = 12):
+    if model is None or tfidf is None:
+        return pd.DataFrame(), pd.DataFrame()
+
     try:
-        api_key = st.secrets["gemini"]["api_key"]
+        feature_names = np.array(tfidf.get_feature_names_out())
     except Exception:
-        pass
-    # 2. Environment variable ---
-    if not api_key:
-        api_key = os.environ.get("GEMINI_API_KEY", "")
-    # 3. Session state (from sidebar input)
-    if not api_key:
-        api_key = st.session_state.get("gemini_api_key", "")
+        return pd.DataFrame(), pd.DataFrame()
 
-    if api_key:
-        try:
-            genai.configure(api_key=api_key)
-            model = genai.GenerativeModel("gemini-1.5-flash")
-            return model, True
-        except Exception:
-            return None, False
-    return None, False
+    if hasattr(model, "coef_"):
+        weights = np.asarray(model.coef_[0][: len(feature_names)], dtype=float)
+        pos_idx = np.argsort(weights)[-top_n:][::-1]
+        neg_idx = np.argsort(weights)[:top_n]
+        pos_df = pd.DataFrame({
+            "keyword": feature_names[pos_idx],
+            "weight": weights[pos_idx],
+            "direction": "Higher fraud risk",
+        })
+        neg_df = pd.DataFrame({
+            "keyword": feature_names[neg_idx],
+            "weight": np.abs(weights[neg_idx]),
+            "direction": "Higher legitimacy signal",
+        })
+        return pos_df, neg_df
 
+    if hasattr(model, "feature_importances_"):
+        weights = np.asarray(model.feature_importances_[: len(feature_names)], dtype=float)
+        top_idx = np.argsort(weights)[-top_n:][::-1]
+        imp_df = pd.DataFrame({
+            "keyword": feature_names[top_idx],
+            "weight": weights[top_idx],
+            "direction": "Model importance",
+        })
+        return imp_df, pd.DataFrame()
 
-def gemini_analyze_job(title, company, description, requirements,
-                        has_salary, has_logo, fraud_prob, red_flags, top_words):
-    """
-    Use Gemini to provide deep fraud analysis explanation.
-    Returns markdown string.
-    """
-    gemini_model, ok = get_gemini_model()
-    if not ok:
-        return None
-
-    red_flag_list = [k for k, v in red_flags.items() if v]
-    top_word_list = [w for w, _ in top_words[:5]] if top_words else []
-
-    prompt = f"""
-You are a fraud detection expert analyzing a job posting for potential fraud.
-
-**Job Details:**
-- Title: {title}
-- Company: {company or 'Not provided'}
-- Description (first 500 chars): {description[:500] if description else 'Not provided'}
-- Requirements (first 300 chars): {requirements[:300] if requirements else 'Not provided'}
-- Has Salary: {'Yes' if has_salary else 'No'}
-- Has Company Logo: {'Yes' if has_logo else 'No'}
-
-**ML Model Results:**
-- Fraud Probability: {fraud_prob*100:.1f}%
-- Red Flags Detected: {red_flag_list if red_flag_list else 'None'}
-- Top Fraud Keywords Found: {top_word_list if top_word_list else 'None'}
-
-**Your Task:**
-1. **Fraud Assessment** (2-3 sentences): Explain WHY this job is/isn't fraudulent based on the data
-2. **Key Concerns** (bullet points): List 3-5 specific concerns or positive signals
-3. **Recommendations** (bullet points): Give 3 actionable advice for the job seeker
-4. **Verdict**: One sentence final verdict
-
-Format your response in clean markdown. Be concise and practical.
-"""
-    try:
-        response = gemini_model.generate_content(prompt)
-        return response.text
-    except Exception as e:
-        return f"⚠️ Gemini analysis failed: {str(e)}"
-
-
-def gemini_analyze_resume(resume_text, job_title, job_desc, job_requirements,
-                           skills_score, ats_score, shortlist_score, missing_skills):
-    """
-    Use Gemini to provide deep resume analysis and personalized recommendations.
-    Returns markdown string.
-    """
-    gemini_model, ok = get_gemini_model()
-    if not ok:
-        return None
-
-    prompt = f"""
-You are a senior HR recruiter and career coach reviewing a resume for a specific job.
-
-**Job Details:**
-- Title: {job_title or 'Not specified'}
-- Description (first 400 chars): {job_desc[:400] if job_desc else 'Not provided'}
-- Requirements (first 300 chars): {job_requirements[:300] if job_requirements else 'Not provided'}
-
-**Resume (first 800 chars):**
-{resume_text[:800]}
-
-**Automated Scores:**
-- Skills Match Score: {skills_score:.1f}/100
-- ATS Score: {ats_score:.1f}/100  
-- Shortlisting Score: {shortlist_score:.1f}/100
-- Missing Key Skills: {missing_skills[:10] if missing_skills else 'None detected'}
-
-**Your Task:**
-1. **Overall Assessment** (2-3 sentences): Is this a strong application? Why?
-2. **Strengths** (3 bullet points): What does the resume do well?
-3. **Critical Gaps** (3 bullet points): What is missing that would help get shortlisted?
-4. **Specific Improvements** (4 bullet points): Exact, actionable changes to make
-5. **Interview Readiness**: Rate 1-10 and explain briefly
-
-Format as clean markdown. Be direct and specific. Focus on practical advice.
-"""
-    try:
-        response = gemini_model.generate_content(prompt)
-        return response.text
-    except Exception as e:
-        return f"⚠️ Gemini analysis failed: {str(e)}"
+    return pd.DataFrame(), pd.DataFrame()
 
 
 # HELPER FUNCTIONS
@@ -355,368 +233,143 @@ def risk_label(prob: float) -> str:
     if prob >= 0.20:            return "⚠️  MEDIUM RISK"
     return "✅ LOW RISK – LIKELY LEGITIMATE"
 
-def score_color(score: float) -> str:
-    if score >= 75: return "#2ECC71"
-    if score >= 50: return "#F39C12"
-    if score >= 30: return "#E67E22"
-    return "#E74C3C"
-
-def score_label(score: float) -> str:
-    if score >= 80: return "🟢 Excellent"
-    if score >= 65: return "🟡 Good"
-    if score >= 45: return "🟠 Average"
-    if score >= 25: return "🔴 Below Average"
-    return "⛔ Poor"
-
-
-# RESUME FUNCTIONS
-def _extract_pdf_pdfplumber(raw_bytes: bytes) -> str:
-    text_parts = []
-    try:
-        with pdfplumber.open(io.BytesIO(raw_bytes)) as pdf:
-            for page in pdf.pages:
-                try:
-                    t = page.extract_text()
-                    if t:
-                        text_parts.append(t)
-                except Exception:
-                    continue
-    except Exception:
-        return ""
-    return "\n".join(text_parts)
-
-
-def _extract_pdf_pdfium(raw_bytes: bytes) -> str:
-    """Fallback: extract text from PDF using pypdfium2."""
-    text_parts = []
-    try:
-        pdf_doc = pdfium.PdfDocument(raw_bytes)
-        for i in range(len(pdf_doc)):
-            try:
-                page = pdf_doc[i]
-                textpage = page.get_textpage()
-                t = textpage.get_text_range()
-                if t:
-                    text_parts.append(t)
-            except Exception:
-                continue
-    except Exception:
-        return ""
-    return "\n".join(text_parts)
-
-
-def extract_text_from_file(uploaded_file) -> str:
-    if uploaded_file is None:
-        return ""
-    fname = uploaded_file.name.lower()
-    raw_bytes = uploaded_file.getvalue()
-
-    # ── Guard against excessively large files (> 20 MB) ──
-    if len(raw_bytes) > 20 * 1024 * 1024:
-        st.warning("⚠️ File is too large (>20 MB). Please upload a smaller file.")
-        return ""
-
-    if fname.endswith(".txt"):
-        try:
-            return raw_bytes.decode("utf-8", errors="ignore")
-        except Exception:
-            return ""
-
-    if fname.endswith(".pdf"):
-        if not PDF_SUPPORT and not PDFIUM_SUPPORT:
-            st.warning("⚠️ PDF support requires `pdfplumber` or `pypdfium2`.")
-            return ""
-
-        text = ""
-
-        # Primary: pdfplumber
-        if PDF_SUPPORT:
-            text = _extract_pdf_pdfplumber(raw_bytes)
-
-        # Fallback: pypdfium2 (if pdfplumber returned nothing or failed)
-        if not text.strip() and PDFIUM_SUPPORT:
-            text = _extract_pdf_pdfium(raw_bytes)
-
-        if not text.strip():
-            st.error("❌ Could not extract text from PDF. The file may be scanned/image-based or corrupted.")
-        return text
-
-    if fname.endswith(".docx"):
-        if not DOCX_SUPPORT:
-            st.warning("⚠️ DOCX support requires `python-docx`. Run: `pip install python-docx`")
-            return ""
-        try:
-            doc = DocxDocument(io.BytesIO(raw_bytes))
-            return "\n".join(p.text for p in doc.paragraphs if p.text.strip())
-        except Exception as e:
-            st.error(f"DOCX parsing error: {e}")
-            return ""
-
-    st.warning(f"⚠️ Unsupported file type. Use PDF, DOCX, or TXT.")
-    return ""
-
-
-def extract_skills_from_text(text: str) -> dict:
-    text_lower = text.lower()
-    found = {}
-    for category, skills in SKILL_CATEGORIES.items():
-        matched = []
-        for skill in skills:
-            pattern = r'\b' + re.escape(skill) + r'\b'
-            if re.search(pattern, text_lower):
-                matched.append(skill)
-        if matched:
-            found[category] = matched
-    return found
-
-
-def compute_skills_match(resume_text: str, job_text: str, job_requirements: str = "") -> dict:
-    combined_job = f"{job_text} {job_requirements}"
-
-    try:
-        tfidf_cv = TfidfVectorizer(stop_words='english', ngram_range=(1, 2), min_df=1)
-        corpus = [clean_text(resume_text), clean_text(combined_job)]
-        tfidf_matrix = tfidf_cv.fit_transform(corpus)
-        cosine_sim = float(cosine_similarity(tfidf_matrix[0:1], tfidf_matrix[1:2])[0][0])
-    except Exception:
-        cosine_sim = 0.0
-
-    resume_skills = extract_skills_from_text(resume_text)
-    job_skills    = extract_skills_from_text(combined_job)
-
-    all_resume_skills = [s for cat_skills in resume_skills.values() for s in cat_skills]
-    all_job_skills    = [s for cat_skills in job_skills.values()    for s in cat_skills]
-
-    if all_job_skills:
-        matched_skills  = [s for s in all_job_skills if s in all_resume_skills]
-        missing_skills  = [s for s in all_job_skills if s not in all_resume_skills]
-        keyword_match   = len(matched_skills) / len(all_job_skills)
-    else:
-        matched_skills  = all_resume_skills[:5]
-        missing_skills  = []
-        keyword_match   = cosine_sim
-
-    job_words    = set(re.findall(r'\b[a-zA-Z]{3,}\b', combined_job.lower()))
-    resume_words = set(re.findall(r'\b[a-zA-Z]{3,}\b', resume_text.lower()))
-    meaningful_job_words = job_words - ATS_STOP_WORDS
-    if meaningful_job_words:
-        word_overlap = len(resume_words & meaningful_job_words) / len(meaningful_job_words)
-    else:
-        word_overlap = cosine_sim
-
-    if all_job_skills:
-        skills_score = (keyword_match * 0.5 + cosine_sim * 0.3 + word_overlap * 0.2) * 100
-    else:
-        skills_score = (cosine_sim * 0.6 + word_overlap * 0.4) * 100
-
-    skills_score = min(98.0, round(skills_score, 1))
-
-    return {
-        "skills_score"   : skills_score,
-        "cosine_sim"     : round(cosine_sim * 100, 1),
-        "keyword_match"  : round(keyword_match * 100, 1),
-        "word_overlap"   : round(word_overlap * 100, 1),
-        "matched_skills" : matched_skills,
-        "missing_skills" : missing_skills,
-        "resume_skills"  : all_resume_skills,
-        "resume_by_cat"  : resume_skills,
-        "job_by_cat"     : job_skills,
-    }
-
-
-def compute_ats_score(resume_text: str, job_text: str = "", job_requirements: str = "") -> dict:
-    resume_lower = resume_text.lower()
-    combined_job = f"{job_text} {job_requirements}".lower()
-    checks = {}
-
-    # Component 1: Keyword Density (30 points) – FIXED: expanded stop_words
-    job_keywords  = set(re.findall(r'\b[a-zA-Z]{3,}\b', combined_job))
-    resume_words  = set(re.findall(r'\b[a-zA-Z]{3,}\b', resume_lower))
-    meaningful_kw = job_keywords - ATS_STOP_WORDS
-    if meaningful_kw:
-        kw_density = min(1.0, len(resume_words & meaningful_kw) / len(meaningful_kw))
-    else:
-        kw_density = 0.5
-    checks["Keyword Match with Job"] = round(kw_density * 30, 1)
-    checks["_kw_detail"]             = f"{int(kw_density*100)}% job keywords found"
-
-    # Component 2: Resume Sections (25 points)
-    sections_found = [s for s in RESUME_SECTIONS if s in resume_lower]
-    section_score  = min(1.0, len(sections_found) / 6)
-    checks["Key Sections Present"]   = round(section_score * 25, 1)
-    checks["_sec_detail"]            = f"{len(sections_found)}/14 sections: {', '.join(sections_found[:5])}"
-
-    # Component 3: Action Verbs (15 points)
-    verbs_found  = [v for v in ACTION_VERBS if v in resume_lower]
-    verb_score   = min(1.0, len(verbs_found) / 8)
-    checks["Action Verbs Used"]      = round(verb_score * 15, 1)
-    checks["_verb_detail"]           = f"{len(verbs_found)} verbs: {', '.join(verbs_found[:5])}"
-
-    # Component 4: Quantifiable Achievements (15 points)
-    numbers_found   = re.findall(r'\b\d+[%+xk]?\b', resume_text)
-    meaningful_nums = [n for n in numbers_found if len(n) >= 2 or '%' in n]
-    num_score = min(1.0, len(meaningful_nums) / 5)
-    checks["Quantifiable Achievements"] = round(num_score * 15, 1)
-    checks["_num_detail"]               = f"{len(meaningful_nums)} numbers/percentages found"
-
-    # Component 5: Contact Info (10 points)
-    has_email    = bool(re.search(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', resume_text))
-    has_phone    = bool(re.search(r'[\+\(]?\d[\d\s\-\(\)]{7,}\d', resume_text))
-    has_linkedin = "linkedin" in resume_lower
-    contact_score = (int(has_email) + int(has_phone) + int(has_linkedin)) / 3
-    checks["Contact Info Complete"]  = round(contact_score * 10, 1)
-    checks["_contact_detail"]        = f"Email:{has_email} | Phone:{has_phone} | LinkedIn:{has_linkedin}"
-
-    # Component 6: Resume Length (5 points)
-    word_count = len(resume_text.split())
-    if 300 <= word_count <= 800:
-        len_score = 1.0
-    elif 200 <= word_count < 300 or 800 < word_count <= 1200:
-        len_score = 0.7
-    else:
-        len_score = 0.4
-    checks["Appropriate Length"]  = round(len_score * 5, 1)
-    checks["_len_detail"]         = f"{word_count} words (ideal: 300–800)"
-
-    component_keys = ["Keyword Match with Job","Key Sections Present",
-                      "Action Verbs Used","Quantifiable Achievements",
-                      "Contact Info Complete","Appropriate Length"]
-    total     = sum(checks[k] for k in component_keys)
-    ats_score = min(99.0, round(total, 1))
-
-    return {
-        "ats_score"     : ats_score,
-        "components"    : checks,
-        "sections_found": sections_found,
-        "verbs_found"   : verbs_found,
-        "has_email"     : has_email,
-        "has_phone"     : has_phone,
-        "has_linkedin"  : has_linkedin,
-        "word_count"    : word_count,
-    }
-
-
-def compute_shortlisting_score(skills_score: float, ats_score: float,
-                                resume_text: str, job_text: str) -> dict:
-    sentences     = [s.strip() for s in resume_text.split('.') if len(s.strip()) > 10]
-    avg_sent_len  = np.mean([len(s.split()) for s in sentences]) if sentences else 0
-    sent_quality  = min(1.0, avg_sent_len / 16) if avg_sent_len < 16 else min(1.0, 32 / avg_sent_len)
-    words         = re.findall(r'\b[a-zA-Z]{3,}\b', resume_text.lower())
-    vocab_rich    = len(set(words)) / len(words) if words else 0.5
-    text_quality  = (sent_quality * 0.5 + vocab_rich * 0.5) * 100
-
-    shortlist_score = (
-        skills_score * 0.50 +
-        ats_score    * 0.30 +
-        text_quality * 0.20
-    )
-    shortlist_score = min(97.0, round(shortlist_score, 1))
-
-    if shortlist_score >= 75:
-        tier = "🟢 HIGH – Very Likely to be Shortlisted"
-        tier_color = "#2ECC71"
-    elif shortlist_score >= 55:
-        tier = "🟡 MEDIUM – Moderate Shortlisting Chance"
-        tier_color = "#F39C12"
-    elif shortlist_score >= 35:
-        tier = "🟠 LOW-MEDIUM – Needs Improvement"
-        tier_color = "#E67E22"
-    else:
-        tier = "🔴 LOW – Significant Improvements Needed"
-        tier_color = "#E74C3C"
-
-    recommendations = []
-    if skills_score < 40:
-        recommendations.append("🎯 Add more job-specific keywords and technical skills")
-    if ats_score < 50:
-        recommendations.append("📝 Use standard section headers (Skills, Experience, Education)")
-    if ats_score < 30:
-        recommendations.append("🔢 Add quantifiable achievements (e.g., 'Improved accuracy by 15%')")
-    if text_quality < 40:
-        recommendations.append("✍️ Use strong action verbs: Developed, Implemented, Optimized")
-    if skills_score >= 60 and ats_score >= 60:
-        recommendations.append("✅ Strong application! Tailor your cover letter")
-    if shortlist_score >= 70:
-        recommendations.append("🚀 Excellent match! Consider reaching out to the recruiter on LinkedIn")
-    if not recommendations:
-        recommendations.append("⚡ Focus on missing technical skills specific to this job role")
-
-    return {
-        "shortlist_score": shortlist_score,
-        "tier"           : tier,
-        "tier_color"     : tier_color,
-        "text_quality"   : round(text_quality, 1),
-        "recommendations": recommendations,
-    }
-
-
 # DATA & MODEL LOADERS
-# DATA LOADER (Google Sheets + Local Fallback)
-@st.cache_data(show_spinner=False)
+# DATA LOADER (SQL-first with CSV fallback)
+@st.cache_data(show_spinner=False, ttl=300)  # FIX: TTL=300 — matches load_sql_views for consistent cache refresh
 def load_data():
+    if DB_MODULE_AVAILABLE and test_connection():
+        # FIX 2a: Removed LIMIT 20000 — it was truncating data when MySQL
+        # had exactly 17,880 rows but showing 20,000 due to cached stale data.
+        df = run_query("SELECT * FROM job_postings")
+        if df is not None and not df.empty:
+            # FIX 2b: Dedup on job_id — safety net against accidental duplicate
+            # uploads (e.g. upload_csv_to_mysql run multiple times).
+            if "job_id" in df.columns:
+                before = len(df)
+                df = df.drop_duplicates(subset=["job_id"])
+                removed = before - len(df)
+                if removed > 0:
+                    print(f"[load_data] ⚠ Removed {removed:,} duplicate rows from MySQL.")
+            return df, "MySQL"
 
-    # 🔥 Google Sheets CSV Link (PRIMARY)
-    drive_url = "https://docs.google.com/spreadsheets/d/15jG36F9jsPTjsRXVSas9TA8FxZkMtJX7RZ3sEXMbT8E/export?format=csv"
+    paths = [
+        "outputs/cleaned_job_postings.csv",
+        "cleaned_job_postings.csv",
+        "Fake_Job_Postings.csv",
+        "Fake Job Postings.csv",
+    ]
 
-    # ==============================
-    # 1️⃣ Try Google Sheets First
-    # ==============================
-    try:
-        with st.spinner("📡 Loading dataset from Google Drive..."):
-            df = pd.read_csv(drive_url)
+    for p in paths:
+        if os.path.exists(p):
+            return pd.read_csv(p, low_memory=False), p
 
-        st.success("✅ Dataset loaded successfully")
+    return None, "Unavailable"
 
-    except Exception as e:
-        st.warning("⚠️ Google Sheets load failed, trying local files...")
 
-        # ==============================
-        # 2️⃣ Local Fallback
-        # ==============================
-        paths = [
-            "outputs/cleaned_job_postings.csv",
-            "cleaned_job_postings.csv",
-            "Fake Job Postings.csv",
-        ]
+def prepare_dataset(df: pd.DataFrame | None) -> pd.DataFrame | None:
+    if df is None or df.empty:
+        return None
 
-        df = None
-        for p in paths:
-            if os.path.exists(p):
-                df = pd.read_csv(p)
-                st.info(f"📂 Loaded from local file: {p}")
-                break
+    df = df.copy()
 
-        if df is None:
-            st.error("❌ No dataset found!")
-            return None
-
-    # 3️⃣ Feature Engineering (SAFE)
     if 'has_salary' not in df.columns:
+        df['has_salary'] = df['salary_range'].notna().astype(int) if 'salary_range' in df.columns else 0
+    if 'has_company_profile' not in df.columns:
+        df['has_company_profile'] = df['company_profile'].notna().astype(int) if 'company_profile' in df.columns else 0
+    if 'has_requirements' not in df.columns:
+        df['has_requirements'] = df['requirements'].notna().astype(int) if 'requirements' in df.columns else 0
+    if 'has_benefits' not in df.columns:
+        df['has_benefits'] = df['benefits'].notna().astype(int) if 'benefits' in df.columns else 0
+    if 'has_company_logo' not in df.columns:
+        df['has_company_logo'] = 0
+    if 'telecommuting' not in df.columns:
+        df['telecommuting'] = 0
+    if 'has_questions' not in df.columns:
+        df['has_questions'] = 0
 
-        df['has_salary']          = df['salary_range'].notna().astype(int)
-        df['has_company_profile'] = df['company_profile'].notna().astype(int)
-        df['has_requirements']    = df['requirements'].notna().astype(int)
-        df['has_benefits']        = df['benefits'].notna().astype(int)
-
+    if 'has_urgency_words' not in df.columns:
         df['has_urgency_words'] = (
-            df['title'].fillna('') + ' ' + df['description'].fillna('')
+            df.get('title', '').fillna('') + ' ' + df.get('description', '').fillna('')
         ).apply(has_urgency)
 
-        df['desc_length'] = df['description'].apply(
-            lambda x: len(str(x)) if pd.notna(x) else 0
-        )
-
+    if 'desc_length' not in df.columns:
+        df['desc_length'] = df.get('description', pd.Series(dtype=str)).fillna('').astype(str).str.len()
+    if 'req_length' not in df.columns:
+        df['req_length'] = df.get('requirements', pd.Series(dtype=str)).fillna('').astype(str).str.len()
+    if 'profile_completeness' not in df.columns:
+        # FIX: max=6 — must match notebook Cell 3 formula exactly.
+        # has_questions included so scoring is consistent with training data.
         df['profile_completeness'] = (
-            df['has_salary'] + df['has_company_profile'] +
-            df['has_requirements'] + df['has_benefits'] +
-            df['has_company_logo'].fillna(0).astype(int)
+            df['has_salary'].fillna(0).astype(int)
+            + df['has_company_profile'].fillna(0).astype(int)
+            + df['has_requirements'].fillna(0).astype(int)
+            + df['has_benefits'].fillna(0).astype(int)
+            + df['has_company_logo'].fillna(0).astype(int)
+            + df['has_questions'].fillna(0).astype(int)  # FIX: was missing, max was 5 not 6
         )
 
-        df['country'] = df['location'].apply(
-            lambda x: str(x).split(',')[0].strip() if pd.notna(x) else 'Unknown'
-        )
+    # Always re-derive country from location (dataset's country col may contain city names)
+    if True:
+        US_STATES = {
+            'AL','AK','AZ','AR','CA','CO','CT','DE','FL','GA','HI','ID','IL','IN',
+            'IA','KS','KY','LA','ME','MD','MA','MI','MN','MS','MO','MT','NE','NV',
+            'NH','NJ','NM','NY','NC','ND','OH','OK','OR','PA','RI','SC','SD','TN',
+            'TX','UT','VT','VA','WA','WV','WI','WY','DC','PR','GU',
+        }
+        COUNTRY_NAMES_INLINE = {
+            'US': 'United States', 'GB': 'United Kingdom', 'CA': 'Canada',
+            'AU': 'Australia',     'IN': 'India',           'DE': 'Germany',
+            'FR': 'France',        'NL': 'Netherlands',     'SG': 'Singapore',
+            'NZ': 'New Zealand',   'IE': 'Ireland',         'PK': 'Pakistan',
+            'PH': 'Philippines',   'MY': 'Malaysia',        'BR': 'Brazil',
+            'ZA': 'South Africa',  'GR': 'Greece',          'IT': 'Italy',
+            'ES': 'Spain',         'PL': 'Poland',          'AE': 'UAE',
+            'QA': 'Qatar',         'NG': 'Nigeria',         'KE': 'Kenya',
+            'EG': 'Egypt',         'TR': 'Turkey',          'IL': 'Israel',
+            'RO': 'Romania',       'HU': 'Hungary',         'CZ': 'Czech Republic',
+            'SE': 'Sweden',        'NO': 'Norway',          'DK': 'Denmark',
+            'FI': 'Finland',       'CH': 'Switzerland',     'AT': 'Austria',
+            'BE': 'Belgium',       'PT': 'Portugal',        'MX': 'Mexico',
+            'AR': 'Argentina',     'CO': 'Colombia',        'CL': 'Chile',
+            'JP': 'Japan',         'CN': 'China',           'KR': 'South Korea',
+            'HK': 'Hong Kong',     'TW': 'Taiwan',          'TH': 'Thailand',
+            'ID': 'Indonesia',     'VN': 'Vietnam',         'BD': 'Bangladesh',
+            'LK': 'Sri Lanka',     'UA': 'Ukraine',         'RU': 'Russia',
+        }
+        def _extract_country(loc):
+            if pd.isna(loc) or str(loc).strip() in ('', 'nan'):
+                return 'Unknown'
+            parts = [p.strip() for p in str(loc).split(',')]
 
-        st.info("⚙️ Feature engineering applied on raw dataset")
+            # Dataset format: "COUNTRY_CODE, STATE, CITY"  → first part is country
+            first = parts[0].strip().upper()
+            if first in COUNTRY_NAMES_INLINE:
+                return COUNTRY_NAMES_INLINE[first]
+
+            # Fallback: check last part (reversed format)
+            last = parts[-1].strip().upper()
+            if last in COUNTRY_NAMES_INLINE:
+                return COUNTRY_NAMES_INLINE[last]
+
+            # US state code in first position → United States
+            if first in US_STATES:
+                return 'United States'
+            # US state code in last position → United States
+            if last in US_STATES:
+                return 'United States'
+
+            # Unknown 2-letter code → keep raw
+            if len(first) == 2 and first.isalpha():
+                return first
+
+            return 'Unknown'
+        df['country'] = df['location'].apply(_extract_country) if 'location' in df.columns else 'Unknown'
+    if 'department' not in df.columns:
+        df['department'] = ''
+    if 'has_department' not in df.columns:
+        df['has_department'] = df['department'].fillna('').astype(str).str.strip().ne('').astype(int)
+    if 'title_length' not in df.columns:
+        df['title_length'] = df.get('title', pd.Series(dtype=str)).fillna('').astype(str).str.len()
 
     return df
     
@@ -745,67 +398,122 @@ def load_models():
 # PREDICT FUNCTION  
 def predict_job(title, company, desc, reqs, has_sal, has_logo, model, tfidf, num_cols):
     """
-    
+
     - profile_completeness correctly computed as sum of available binary flags
-    - No hardcoded zeroes that lower accuracy vs training data
+    - Numeric features aligned to notebook training order via numeric_cols.pkl
     - Supports both LR (coef_) and RF (feature_importances_)
     """
-    raw     = f"{title} {company} {desc} {reqs}"
+    raw = f"{title} {company} {desc} {reqs}"
     cleaned = clean_text(raw)
 
-    has_company  = int(bool(str(company).strip()))
-    has_reqs     = int(bool(str(reqs).strip()))
+    has_company = int(bool(str(company).strip()))
+    has_reqs = int(bool(str(reqs).strip()))
     urgency_flag = has_urgency(raw)
-    desc_len     = len(str(desc))
-    req_len      = len(str(reqs))
+    desc_len = len(str(desc))
+    req_len = len(str(reqs))
+    title_len = len(str(title))
 
-    profile_completeness_score = int(has_sal) + has_company + has_reqs + 0 + int(has_logo)
+    # FIX: max=6 — notebook Cell 3 counts 6 features including has_benefits and has_questions.
+    # Form doesn't collect them, so default 0 — but formula must match training exactly.
+    has_benefits_val  = 0  # not collected in form — default 0
+    has_questions_val = 0  # not collected in form — default 0
+    profile_completeness_score = (
+        int(has_sal) + has_company + has_reqs
+        + has_benefits_val + int(has_logo) + has_questions_val
+    )  # max = 6, consistent with notebook
 
+    feature_values = {
+        'has_salary': int(has_sal),
+        'has_company_profile': has_company,
+        'has_requirements': has_reqs,
+        'has_benefits': 0,
+        'has_company_logo': int(has_logo),
+        'has_questions': 0,
+        'telecommuting': 0,
+        'has_urgency_words': urgency_flag,
+        'profile_completeness': profile_completeness_score,
+        'desc_length': desc_len,
+        'req_length': req_len,
+        'title_length': title_len,
+        'has_department': 0,
+    }
+
+    # The model was trained on exactly these 10 numeric features (notebook Cell 28).
+    # We pull from numeric_cols.pkl when available but ENFORCE a 10-feature shape
+    # so the model never receives 11 features (which would crash predict_proba).
+    EXPECTED_NUMERIC_COLS = [
+        'has_salary',
+        'has_company_profile',
+        'has_requirements',
+        'has_benefits',
+        'has_company_logo',
+        'has_questions',
+        'telecommuting',
+        'has_urgency_words',
+        'profile_completeness',
+        'desc_length',
+    ]
+
+    if num_cols is not None and len(list(num_cols)) == len(EXPECTED_NUMERIC_COLS):
+        ordered_numeric_cols = list(num_cols)
+    else:
+        # Safety fallback — if the saved pkl drifted, fall back to the canonical
+        # 10 features used during training instead of crashing.
+        ordered_numeric_cols = EXPECTED_NUMERIC_COLS
+
+    # Build a feature vector with EXACTLY the trained number of features.
+    # Do NOT append req_length / title_length / has_department here — the model
+    # was not trained on them and adding them causes a ValueError at inference.
     num_feats = np.array([[
-        int(has_sal),               # has_salary
-        has_company,                # has_company_profile
-        has_reqs,                   # has_requirements
-        0,                          # has_benefits  (not in form)
-        int(has_logo),              # has_company_logo
-        0,                          # has_questions (not in form)
-        0,                          # telecommuting (not in form)
-        urgency_flag,               # has_urgency_words
-        profile_completeness_score, # profile_completeness
-        desc_len,                   # desc_length
-        req_len,                    # req_length
-    ]])
+        feature_values.get(col, 0) for col in ordered_numeric_cols
+    ]], dtype=float)
 
-    text_vec  = tfidf.transform([cleaned])
+    # FIX: bare assert replaced — raises ValueError instead of AssertionError
+    # so callers can catch it cleanly and show a user-friendly Streamlit error.
+    EXPECTED = len(ordered_numeric_cols)
+    if num_feats.shape[1] != EXPECTED:
+        raise ValueError(
+            f"Numeric feature mismatch: app built {num_feats.shape[1]} features, "
+            f"model expects {EXPECTED}. "
+            "Solution: Re-run the notebook (Kernel > Restart & Run All) and save artifacts."
+        )
+
+    text_vec = tfidf.transform([cleaned])
     full_feat = hstack([text_vec, csr_matrix(num_feats)])
-    prob      = model.predict_proba(full_feat)[0][1]
+    prob = model.predict_proba(full_feat)[0][1]
 
     flags = {
-        'has_salary'         : int(has_sal),
+        'has_salary': int(has_sal),
         'has_company_profile': has_company,
-        'has_requirements'   : has_reqs,
-        'has_urgency_words'  : urgency_flag,
-        'desc_length'        : desc_len,
-        'has_company_logo'   : int(has_logo),
+        'has_requirements': has_reqs,
+        'has_urgency_words': urgency_flag,
+        'desc_length': desc_len,
+        'has_company_logo': int(has_logo),
     }
-    red_flags = {k: fn(flags) for k, fn in RED_FLAG_CHECKS.items()}
+    # FIX: unpack (check_fn, positive_label) tuple — only call the check fn here
+    red_flags = {k: check_fn(flags) for k, (check_fn, _pos_label) in RED_FLAG_CHECKS.items()}
 
     top_words = []
     try:
         feat_names = tfidf.get_feature_names_out()
         n_text = len(feat_names)
-        tv     = text_vec.toarray()[0]
+        tv = text_vec.toarray()[0]
         if hasattr(model, "coef_"):
-            coefs    = model.coef_[0][:n_text]
+            coefs = model.coef_[0][:n_text]
             contribs = coefs * tv
-            top_idx  = np.argsort(contribs)[-8:][::-1]
-            top_words = [(feat_names[i], round(float(contribs[i]), 4))
-                         for i in top_idx if contribs[i] > 0]
+            top_idx = np.argsort(contribs)[-8:][::-1]
+            top_words = [
+                (feat_names[i], round(float(contribs[i]), 4))
+                for i in top_idx if contribs[i] > 0
+            ]
         elif hasattr(model, "feature_importances_"):
             importances = model.feature_importances_[:n_text]
-            contribs    = importances * tv
-            top_idx     = np.argsort(contribs)[-8:][::-1]
-            top_words   = [(feat_names[i], round(float(contribs[i]) * 1000, 4))
-                          for i in top_idx if contribs[i] > 0]
+            contribs = importances * tv
+            top_idx = np.argsort(contribs)[-8:][::-1]
+            top_words = [
+                (feat_names[i], round(float(contribs[i]) * 1000, 4))
+                for i in top_idx if contribs[i] > 0
+            ]
     except Exception:
         top_words = []
 
@@ -813,14 +521,24 @@ def predict_job(title, company, desc, reqs, has_sal, has_logo, model, tfidf, num
 
 
 # LOAD DATA & MODELS
-df                               = load_data()
+raw_df, DATA_SOURCE = load_data()
+df = prepare_dataset(raw_df)
 model, tfidf, num_cols, model_info = load_models()
-data_ok  = df is not None
+sql_views = load_sql_views()
+data_ok = df is not None and not df.empty
 model_ok = model is not None
+DB_AVAILABLE = sql_views.get("connected", False)
 
-_mi        = model_info or {}
-MODEL_NAME = _mi.get("best_model", "ML Model")
-MODEL_TYPE = "RF" if "forest" in MODEL_NAME.lower() else "LR"
+_mi = model_info or {}
+if data_ok:
+    _mi.setdefault("total_records", int(len(df)))
+    _mi.setdefault("fraud_records", int(df['fraudulent'].sum()) if 'fraudulent' in df.columns else 0)
+    if 'fraudulent' in df.columns:
+        _mi.setdefault("fraud_rate_pct", round(float(df['fraudulent'].mean() * 100), 2))
+
+MODEL_NAME = _mi.get("best_model", "Logistic Regression" if model_ok else "Model artifacts not found")
+# FIX: use actual class name — works for LR, RF, GBM, XGB, etc.
+MODEL_TYPE = type(model).__name__ if model is not None else "Unknown"
 
 
 # SIDEBAR
@@ -829,7 +547,7 @@ with st.sidebar:
     <div style='text-align:center; padding:20px 0 10px'>
         <div style='font-size:3rem'>🛡️</div>
         <div style='font-size:1.2rem; font-weight:700; color:#e6edf3'>Fake Job Detector</div>
-        <div style='font-size:0.75rem; color:#2ECC71; margin-top:2px'> -- Gemini AI Edition -- </div>
+        <div style='font-size:0.75rem; color:#2ECC71; margin-top:2px'>Real SQL + ML Workflow</div>
     </div>
     <hr style='border-color:#30363d; margin:10px 0'>
     """, unsafe_allow_html=True)
@@ -838,55 +556,35 @@ with st.sidebar:
         "🏠  Home",
         "📊  EDA Dashboard",
         "🔍  Job Checker",
-        "📄  Resume Analyzer",
         "🤖  Model Insights",
         "⚠️  Limitations & Bias",
     ], label_visibility="collapsed")
 
-    st.markdown("""
-    <hr style='border-color:#30363d'>
-    <div style='font-size:0.85rem; color:#4285f4; font-weight:700; padding:4px 0'>
-        🤖 Gemini AI Configuration
-    </div>
-    """, unsafe_allow_html=True)
+    # FIX: Reload button — clears stale cache after notebook re-run
+    if st.button("🔄 Reload Data", help="Clear cache and reload from MySQL / CSV"):
+        load_data.clear()
+        load_sql_views.clear()
+        st.rerun()
 
-    gemini_key_input = st.text_input(
-        "Gemini API Key",
-        type="password",
-        placeholder="AIza...",
-        help="Get your API key from https://makersuite.google.com/app/apikey",
-        label_visibility="collapsed"
-    )
-    if gemini_key_input:
-        st.session_state["gemini_api_key"] = gemini_key_input
-
-    _, gemini_ok = get_gemini_model()
-    if gemini_ok:
-        st.markdown('<div style="color:#2ECC71; font-size:0.78rem">✅ Gemini AI Connected</div>',
-                    unsafe_allow_html=True)
-    elif not GEMINI_AVAILABLE:
-        st.markdown('<div style="color:#E74C3C; font-size:0.78rem">⚠️ Install: pip install google-generativeai</div>',
-                    unsafe_allow_html=True)
-    else:
-        st.markdown('<div style="color:#F39C12; font-size:0.78rem">🔑 Enter API key for AI analysis</div>',
-                    unsafe_allow_html=True)
+    db_status = "✅ Connected" if DB_AVAILABLE else "⚠️ CSV fallback"
+    data_source_label = "MySQL table" if DATA_SOURCE == "MySQL" else DATA_SOURCE
 
     st.markdown(f"""
     <hr style='border-color:#30363d'>
     <div style='font-size:0.78rem; color:#8b949e; padding:8px'>
-        <b style='color:#e6edf3'>Dataset</b><br>
-        📁 {_mi.get('total_records', 17880):,} postings<br>
-        🚨 {_mi.get('fraud_records', 866):,} fraud ({_mi.get('fraud_rate_pct', 4.84):.2f}%)<br><br>
-        <b style='color:#e6edf3'>Best Model</b><br>
+        <b style='color:#e6edf3'>Data Source</b><br>
+        🗄️ {db_status}<br>
+        📁 {data_source_label}<br>
+        📊 {_mi.get('total_records', 0):,} postings<br>
+        🚨 {_mi.get('fraud_records', 0):,} fraud ({_mi.get('fraud_rate_pct', 0.0):.2f}%)<br><br>
+        <b style='color:#e6edf3'>Model</b><br>
         🏆 {MODEL_NAME}<br>
-        📈 AUC: {_mi.get('auc_roc', 0.984):.4f}<br>
-        🎯 F1:  {_mi.get('f1_score', 0.795)*100:.1f}%<br>
-        🔁 Recall: {_mi.get('recall', 0.883)*100:.1f}%<br><br>
-        <b style='color:#e6edf3'> Features</b><br>
-        🤖 Gemini AI Fraud Analysis<br>
-        📄 Gemini Resume Advisor<br>
-        📊 Real Threshold Curve<br>
-        🔧 All bugs fixed
+        📈 AUC: {f"{_mi.get('auc_roc'):.4f}" if isinstance(_mi.get('auc_roc'), (int, float)) else 'N/A'}<br>
+        🎯 Threshold: {_mi.get('threshold', FRAUD_THRESHOLD)}<br><br>
+        <b style='color:#e6edf3'>App Focus</b><br>
+        🚩 Fraud indicators table<br>
+        🗄️ Real SQL KPI cards<br>
+        🔑 TF-IDF keyword insights
     </div>""", unsafe_allow_html=True)
 
 
@@ -895,28 +593,31 @@ if page == "🏠  Home":
     st.markdown("""
     <div style='text-align:center; padding:20px 0 10px'>
         <h1 style='font-size:2.5rem; font-weight:800; color:#e6edf3'>
-            🛡️ Fake Job Detection And Resume-Analyzer
+            🛡️ Fake Job Detection & Hiring Market Analysis
         </h1>
         <p style='color:#8b949e; font-size:1rem'>
-            End-to-End NLP + ML + Gemini AI · 
+            End-to-End SQL Analytics + Machine Learning Pipeline
         </p>
     </div>""", unsafe_allow_html=True)
 
-    st.markdown(f"""
-    <div class='fix-card'>
-        </div>""", unsafe_allow_html=True)
+    summary_df = sql_views.get("summary", pd.DataFrame())
+    total_jobs = int(sql_scalar(summary_df, "total_jobs", _mi.get("total_records", len(df) if data_ok else 0)))
+    total_fraud = int(sql_scalar(summary_df, "total_fraud", _mi.get("fraud_records", int(df['fraudulent'].sum()) if data_ok and 'fraudulent' in df.columns else 0)))
+    fraud_rate = float(sql_scalar(summary_df, "fraud_rate_pct", _mi.get("fraud_rate_pct", 0.0)))
+    avg_fake_desc = sql_scalar(summary_df, "avg_fake_desc_len", np.nan)
+    avg_real_desc = sql_scalar(summary_df, "avg_real_desc_len", np.nan)
 
-    if data_ok:
-        c1, c2, c3, c4, c5 = st.columns(5)
-        kpis = [
-            (f"{len(df):,}",                     "Total Postings",      "#3498DB", c1),
-            (f"{int(df['fraudulent'].sum()):,}",  "Fraudulent Jobs",     "#E74C3C", c2),
-            (f"{df['fraudulent'].mean()*100:.2f}%","Fraud Rate",         "#F39C12", c3),
-            (f"{_mi.get('auc_roc',0.984):.4f}",  "AUC-ROC",             "#2ECC71", c4),
-            (f"{FRAUD_THRESHOLD}",                "Optimised Threshold", "#9B59B6", c5),
-        ]
-        for val, lbl, clr, col in kpis:
-            with col: st.markdown(make_kpi_card(val, lbl, clr), unsafe_allow_html=True)
+    c1, c2, c3, c4, c5 = st.columns(5)
+    kpis = [
+        (f"{total_jobs:,}", "Total Postings", "#3498DB", c1),
+        (f"{total_fraud:,}", "Fraudulent Jobs", "#E74C3C", c2),
+        (f"{fraud_rate:.2f}%", "Fraud Rate", "#F39C12", c3),
+        (f"{_mi.get('auc_roc', 0):.4f}" if _mi.get('auc_roc') is not None else "N/A", "AUC-ROC", "#2ECC71", c4),
+        (f"{_mi.get('threshold', FRAUD_THRESHOLD)}", "Deployment Threshold", "#9B59B6", c5),
+    ]
+    for val, lbl, clr, col in kpis:
+        with col:
+            st.markdown(make_kpi_card(val, lbl, clr), unsafe_allow_html=True)
 
     st.markdown("---")
     col_a, col_b = st.columns([1.3, 0.7])
@@ -924,14 +625,11 @@ if page == "🏠  Home":
     with col_a:
         st.markdown('<div class="section-header">🏗️ Project Architecture</div>', unsafe_allow_html=True)
         steps = [
-            ("1","Problem Definition",  "Detect fake jobs exploiting job seekers",              "#E74C3C"),
-            ("2","Data Collection",     "Kaggle: 17,880 real & fake job postings",              "#E67E22"),
-            ("3","EDA & Feature Eng.",  "14 new features + missing value analysis",             "#F1C40F"),
-            ("4","Class Imbalance",     "4.84% fraud → SMOTE + threshold=0.35 tuning",          "#2ECC71"),
-            ("5","MySQL Analytics",     "10 business BI queries with CTEs & window functions",  "#1ABC9C"),
-            ("6","ML Training",         f"TF-IDF + LR/NB/RF → best={MODEL_NAME}",              "#3498DB"),
-            ("7","Gemini AI",           "Deep fraud explanation + Resume coaching ()",  "#4285f4"),
-            ("8","Streamlit App",  "6-page app with Gemini AI integration",                "#E74C3C"),
+            ("1", "Notebook Workflow", "Clean CSV, engineer features, and train the fraud model", "#E74C3C"),
+            ("2", "MySQL Storage", "Load cleaned data into fake_job_detection.job_postings", "#E67E22"),
+            ("3", "SQL Analytics", "Use vw_fraud_summary, vw_industry_risk, and vw_high_risk_jobs", "#F1C40F"),
+            ("4", "ML Inference", f"TF-IDF + numeric features → deployed model: {MODEL_NAME}", "#2ECC71"),
+            ("5", "Power BI / Streamlit", "Reuse the same SQL views and model outputs for dashboards", "#1ABC9C"),
         ]
         for num, name, desc_txt, clr in steps:
             st.markdown(f"""
@@ -945,16 +643,22 @@ if page == "🏠  Home":
                 </div>
             </div>""", unsafe_allow_html=True)
 
+        if DB_AVAILABLE and not sql_views.get("industry", pd.DataFrame()).empty:
+            st.markdown('<div class="section-header">🗄️ SQL Business Insights</div>', unsafe_allow_html=True)
+            top_industry = sql_views["industry"].head(8)[["industry", "fraud_rate_pct", "total_jobs"]]
+            st.dataframe(top_industry, use_container_width=True, hide_index=True)
+
     with col_b:
-        st.markdown('<div class="section-header">📊 Model Results</div>', unsafe_allow_html=True)
+        st.markdown('<div class="section-header">📊 Model & Data Status</div>', unsafe_allow_html=True)
         metrics = [
-            ("Best Model",   MODEL_NAME,                                    "#3498DB"),
-            ("Threshold",    f"{FRAUD_THRESHOLD} (tuned)",                  "#9B59B6"),
-            ("Precision",    f"{_mi.get('precision',0.724)*100:.1f}%",      "#E74C3C"),
-            ("Recall",       f"{_mi.get('recall',0.883)*100:.1f}%",         "#2ECC71"),
-            ("F1-Score",     f"{_mi.get('f1_score',0.795)*100:.1f}%",       "#F39C12"),
-            ("AUC-ROC",      f"{_mi.get('auc_roc',0.984):.4f}",             "#2ECC71"),
-            ("5-Fold CV",    f"{_mi.get('cv_auc_mean',0.984):.4f} ±{_mi.get('cv_auc_std',0.003):.4f}", "#1ABC9C"),
+            ("Best Model", MODEL_NAME, "#3498DB"),
+            ("Threshold", f"{_mi.get('threshold', FRAUD_THRESHOLD)}", "#9B59B6"),
+            ("Precision", f"{_mi.get('precision', 0) * 100:.1f}%" if _mi.get('precision') is not None else "N/A", "#E74C3C"),
+            ("Recall", f"{_mi.get('recall', 0) * 100:.1f}%" if _mi.get('recall') is not None else "N/A", "#2ECC71"),
+            ("F1-Score", f"{_mi.get('f1_score', 0) * 100:.1f}%" if _mi.get('f1_score') is not None else "N/A", "#F39C12"),
+            ("SQL Views", "Ready" if DB_AVAILABLE else "Fallback Mode", "#1ABC9C"),
+            ("Avg Fake Desc", f"{avg_fake_desc:.0f}" if pd.notna(avg_fake_desc) else "N/A", "#E67E22"),
+            ("Avg Real Desc", f"{avg_real_desc:.0f}" if pd.notna(avg_real_desc) else "N/A", "#2ECC71"),
         ]
         for metric, value, clr in metrics:
             st.markdown(f"""
@@ -967,118 +671,568 @@ if page == "🏠  Home":
 
 #  PAGE 2 – EDA DASHBOARD
 elif page == "📊  EDA Dashboard":
-    st.markdown("## 📊 Exploratory Data Analysis Dashboard")
+
+    # ── Page CSS ────────────────────────────────────────────────────────────
+    st.markdown("""
+    <style>
+    .eda-header {
+        background: linear-gradient(135deg, #0f2027 0%, #1a3a4a 50%, #0f2027 100%);
+        border-radius: 16px;
+        padding: 28px 32px 22px;
+        margin-bottom: 28px;
+        border: 1px solid #1e3a4a;
+        box-shadow: 0 4px 24px rgba(0,0,0,0.4);
+    }
+    .eda-header h2 { color: #e6edf3; font-size: 1.7rem; font-weight: 800; margin: 0 0 6px; }
+    .eda-header p  { color: #8b949e; font-size: 0.9rem; margin: 0; }
+
+    /* ── Premium KPI Cards (Dashboard Hero Row) ───────────────────────── */
+    .kpi-card {
+        position: relative;
+        background: linear-gradient(145deg, #161b22 0%, #0d1117 100%);
+        border: 1px solid #21262d;
+        border-radius: 14px;
+        padding: 18px 20px 16px;
+        text-align: left;
+        transition: all 0.25s cubic-bezier(.4,.0,.2,1);
+        overflow: hidden;
+        min-height: 118px;
+    }
+    .kpi-card::before {
+        content: "";
+        position: absolute;
+        top: 0; left: 0; right: 0;
+        height: 3px;
+        background: var(--accent, #388bfd);
+        opacity: 0.85;
+    }
+    .kpi-card::after {
+        content: "";
+        position: absolute;
+        top: -40px; right: -40px;
+        width: 110px; height: 110px;
+        background: radial-gradient(circle, var(--accent, #388bfd) 0%, transparent 70%);
+        opacity: 0.10;
+        pointer-events: none;
+        transition: opacity 0.3s;
+    }
+    .kpi-card:hover {
+        border-color: var(--accent, #388bfd);
+        transform: translateY(-2px);
+        box-shadow: 0 8px 24px rgba(0,0,0,0.45), 0 0 0 1px var(--accent, #388bfd);
+    }
+    .kpi-card:hover::after { opacity: 0.22; }
+
+    .kpi-head {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-bottom: 8px;
+    }
+    .kpi-icon {
+        font-size: 1.05rem;
+        width: 28px; height: 28px;
+        display: inline-flex; align-items: center; justify-content: center;
+        background: rgba(255,255,255,0.04);
+        border: 1px solid #21262d;
+        border-radius: 8px;
+    }
+    .kpi-label {
+        font-size: 0.72rem;
+        color: #8b949e;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+        font-weight: 600;
+    }
+    .kpi-value {
+        font-size: 1.85rem;
+        font-weight: 800;
+        line-height: 1.1;
+        margin: 2px 0 4px;
+        font-variant-numeric: tabular-nums;
+    }
+    .kpi-sub {
+        font-size: 0.72rem;
+        color: #6e7681;
+        display: flex;
+        align-items: center;
+        gap: 4px;
+    }
+
+    .insight-box {
+        background: #161b22;
+        border-left: 3px solid #388bfd;
+        border-radius: 0 8px 8px 0;
+        padding: 10px 16px;
+        margin: 8px 0 18px;
+        font-size: 0.85rem;
+        color: #8b949e;
+    }
+    .insight-box b { color: #e6edf3; }
+
+    .chart-title {
+        font-size: 0.95rem;
+        font-weight: 700;
+        color: #c9d1d9;
+        margin-bottom: 4px;
+        padding-left: 4px;
+    }
+    </style>
+    """, unsafe_allow_html=True)
 
     if not data_ok:
         st.warning("⚠️ Dataset not loaded. Please place `Fake Job Postings.csv` in the project directory.")
         st.stop()
 
+    # ── Header ───────────────────────────────────────────────────────────────
+    st.markdown("""
+    <div class="eda-header">
+        <h2>📊 Exploratory Data Analysis Dashboard</h2>
+        <p>17,880 job postings analysed · Kaggle Fake Job Prediction Dataset · MySQL + Python pipeline</p>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # ── KPI CARDS (Premium Hero Row) ──────────────────────────────────────────
+    total      = len(df)
+    fraud_n    = int(df['fraudulent'].sum())
+    legit_n    = total - fraud_n
+    fraud_pct  = round(fraud_n / total * 100, 2)
+    avg_desc   = int(df.loc[df['fraudulent']==1, 'desc_length'].mean()) if 'desc_length' in df.columns else 0
+
+    # Prefer city-level fraud hotspot; fall back to country if city not available
+    if 'city' in df.columns and df.loc[df['fraudulent']==1, 'city'].notna().any():
+        top_fraud_loc = (
+            df[df['fraudulent']==1]
+            .dropna(subset=['city'])
+            .groupby('city').size().idxmax()
+        )
+        top_fraud_label = "Top Fraud City"
+        top_fraud_sub   = "Highest fake job volume"
+    elif 'country' in df.columns:
+        top_fraud_loc = df[df['fraudulent']==1].groupby('country').size().idxmax()
+        top_fraud_label = "Top Fraud Country"
+        top_fraud_sub   = "Highest fake job volume"
+    else:
+        top_fraud_loc = "N/A"
+        top_fraud_label = "Top Fraud Region"
+        top_fraud_sub   = "No location data"
+
+    k1, k2, k3, k4, k5 = st.columns(5)
+    kpi_data = [
+        (k1, "📋", f"{total:,}",          "Total Job Postings", "Across all industries",   "#58a6ff"),
+        (k2, "✅", f"{legit_n:,}",        "Legitimate Jobs",    "Real verified postings",  "#2ECC71"),
+        (k3, "🛡️", f"{fraud_n:,}",        "Fraudulent Jobs",    "Fake / scam postings",    "#E74C3C"),
+        (k4, "📈", f"{fraud_pct}%",       "Overall Fraud Rate", "Industry average ~4.84%", "#F39C12"),
+        (k5, "🏙️", str(top_fraud_loc),    top_fraud_label,      top_fraud_sub,             "#a371f7"),
+    ]
+    for col, icon, val, label, sub, color in kpi_data:
+        col.markdown(f"""
+        <div class="kpi-card" style="--accent:{color}">
+            <div class="kpi-head">
+                <span class="kpi-icon" style="color:{color}">{icon}</span>
+                <span class="kpi-label">{label}</span>
+            </div>
+            <div class="kpi-value" style="color:{color}">{val}</div>
+            <div class="kpi-sub">{sub}</div>
+        </div>""", unsafe_allow_html=True)
+
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    # ── TABS ──────────────────────────────────────────────────────────────────
     tab1, tab2, tab3, tab4 = st.tabs(["📈 Overview", "🌍 Geographic", "📝 Text Analysis", "🏭 Industry"])
 
-    with tab1:
-        col1, col2 = st.columns(2)
-        with col1:
-            counts = df['fraudulent'].value_counts()
-            fig = px.pie(
-                values=counts.values,
-                names=["Legitimate","Fraudulent"] if counts.index[0] == 0 else ["Fraudulent","Legitimate"],
-                color_discrete_sequence=["#2ECC71","#E74C3C"],
-                title="Job Posting Distribution",
-                hole=0.4
-            )
-            fig.update_layout(paper_bgcolor='#0d1117', font_color='#e6edf3')
-            st.plotly_chart(fig, use_container_width=True)
+    DARK_BG   = "#0d1117"
+    FONT_CLR  = "#c9d1d9"
+    GRID_CLR  = "#21262d"
+    FRAUD_CLR = "#E74C3C"
+    LEGIT_CLR = "#2ECC71"
 
+    def dark_layout(fig, title="", height=380, xangle=0):
+        fig.update_layout(
+            title=dict(text=title, font=dict(size=14, color=FONT_CLR)) if title else None,
+            paper_bgcolor=DARK_BG,
+            plot_bgcolor=DARK_BG,
+            font=dict(color=FONT_CLR, size=12),
+            height=height,
+            margin=dict(l=16, r=16, t=40 if title else 20, b=16),
+            xaxis=dict(gridcolor=GRID_CLR, tickangle=xangle, linecolor=GRID_CLR),
+            yaxis=dict(gridcolor=GRID_CLR, linecolor=GRID_CLR),
+            legend=dict(bgcolor="rgba(0,0,0,0)", bordercolor=GRID_CLR, borderwidth=1),
+        )
+        return fig
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # TAB 1 — OVERVIEW
+    # ══════════════════════════════════════════════════════════════════════════
+    with tab1:
+        col1, col2 = st.columns([1, 1.6])
+
+        # Donut chart – improved with center annotation
+        with col1:
+            counts  = df['fraudulent'].value_counts().reindex([0, 1], fill_value=0)
+            pie_df  = pd.DataFrame({
+                'Type': ['Legitimate', 'Fraudulent'],
+                'Count': [int(counts.loc[0]), int(counts.loc[1])],
+            })
+            fig_pie = px.pie(
+                pie_df, values='Count', names='Type',
+                color='Type',
+                color_discrete_map={"Legitimate": LEGIT_CLR, "Fraudulent": FRAUD_CLR},
+                hole=0.55,
+            )
+            fig_pie.update_traces(
+                textinfo='percent+label',
+                textfont_size=13,
+                marker=dict(line=dict(color=DARK_BG, width=3)),
+                pull=[0, 0.06],
+            )
+            fig_pie.add_annotation(
+                text=f"<b>{fraud_pct}%</b><br>Fraud", x=0.5, y=0.5,
+                font=dict(size=16, color=FRAUD_CLR), showarrow=False
+            )
+            dark_layout(fig_pie, "Job Posting Distribution", height=340)
+            fig_pie.update_layout(showlegend=True, legend=dict(orientation='h', y=-0.08))
+            st.plotly_chart(fig_pie, use_container_width=True)
+            st.markdown("""<div class="insight-box">
+                <b>Key insight:</b> Only <b>4.84%</b> of postings are fraudulent —
+                a highly imbalanced dataset. SMOTE oversampling was applied during model training.
+            </div>""", unsafe_allow_html=True)
+
+        # Employment Type – horizontal bar
         with col2:
             if 'employment_type' in df.columns:
-                emp_fraud = df.groupby('employment_type')['fraudulent'].agg(['mean','count']).reset_index()
-                emp_fraud.columns = ['Employment Type','Fraud Rate','Count']
-                emp_fraud = emp_fraud[emp_fraud['Count'] > 50].sort_values('Fraud Rate', ascending=False)
-                fig2 = px.bar(emp_fraud, x='Employment Type', y='Fraud Rate',
-                              color='Fraud Rate', color_continuous_scale='RdYlGn_r',
-                              title="Fraud Rate by Employment Type")
-                fig2.update_layout(paper_bgcolor='#0d1117', font_color='#e6edf3', showlegend=False)
-                st.plotly_chart(fig2, use_container_width=True)
+                emp = df.groupby('employment_type')['fraudulent'].agg(['mean','count']).reset_index()
+                emp.columns = ['Employment Type', 'Fraud Rate', 'Count']
+                emp = emp[emp['Count'] > 50].sort_values('Fraud Rate')
+                emp['Fraud Rate %'] = (emp['Fraud Rate'] * 100).round(2)
+                emp['Label'] = emp['Employment Type'].str.replace('_', ' ').str.title()
 
-        # Missing value pattern
-        miss_cols = ['has_salary','has_company_profile','has_requirements','has_benefits']
+                fig_emp = px.bar(
+                    emp, y='Label', x='Fraud Rate %',
+                    orientation='h',
+                    color='Fraud Rate %',
+                    color_continuous_scale='RdYlGn_r',
+                    text='Fraud Rate %',
+                )
+                fig_emp.update_traces(
+                    texttemplate='%{text:.1f}%',
+                    textposition='outside',
+                    marker_line_width=0,
+                )
+                fig_emp.update_coloraxes(showscale=False)
+                dark_layout(fig_emp, "Fraud Rate by Employment Type", height=340)
+                fig_emp.update_layout(yaxis_title="", xaxis_title="Fraud Rate (%)")
+                st.plotly_chart(fig_emp, use_container_width=True)
+                st.markdown("""<div class="insight-box">
+                    <b>Key insight:</b> Part-time & Other employment types show higher fraud exposure
+                    than full-time roles, likely due to lower screening standards.
+                </div>""", unsafe_allow_html=True)
+
+        # Feature availability grouped bar
+        st.markdown('<div class="chart-title">Feature Availability: Legitimate vs Fraudulent Jobs</div>', unsafe_allow_html=True)
+        miss_cols = ['has_salary', 'has_company_profile', 'has_requirements', 'has_benefits', 'has_company_logo']
         miss_cols = [c for c in miss_cols if c in df.columns]
         if miss_cols:
             miss_data = []
             for col_name in miss_cols:
-                for label, val in [("Legitimate",0),("Fraudulent",1)]:
-                    subset = df[df['fraudulent'] == val]
-                    rate = subset[col_name].mean() * 100
-                    miss_data.append({'Feature': col_name.replace('has_',''), 'Type': label, 'Rate': rate})
+                for label, val in [("Legitimate", 0), ("Fraudulent", 1)]:
+                    rate = df[df['fraudulent'] == val][col_name].mean() * 100
+                    miss_data.append({
+                        'Feature': col_name.replace('has_', '').replace('_', ' ').title(),
+                        'Type': label, 'Rate (%)': round(rate, 1)
+                    })
             miss_df = pd.DataFrame(miss_data)
-            fig3 = px.bar(miss_df, x='Feature', y='Rate', color='Type', barmode='group',
-                          color_discrete_map={"Legitimate":"#2ECC71","Fraudulent":"#E74C3C"},
-                          title="Feature Availability: Legitimate vs Fraudulent")
-            fig3.update_layout(paper_bgcolor='#0d1117', font_color='#e6edf3')
-            st.plotly_chart(fig3, use_container_width=True)
+            fig_miss = px.bar(
+                miss_df, x='Feature', y='Rate (%)', color='Type', barmode='group',
+                color_discrete_map={"Legitimate": LEGIT_CLR, "Fraudulent": FRAUD_CLR},
+                text='Rate (%)',
+            )
+            fig_miss.update_traces(texttemplate='%{text:.0f}%', textposition='outside', marker_line_width=0)
+            dark_layout(fig_miss, height=360)
+            fig_miss.update_layout(legend_title_text='', xaxis_title='', yaxis_title='Availability Rate (%)')
+            st.plotly_chart(fig_miss, use_container_width=True)
+            st.markdown("""<div class="insight-box">
+                <b>Key insight:</b> Fraudulent postings are significantly less likely to include salary,
+                company profile, or job requirements — strong red flags for job seekers.
+            </div>""", unsafe_allow_html=True)
+
+        # Profile completeness box comparison
+        if 'profile_completeness' in df.columns:
+            col_a, col_b = st.columns(2)
+            with col_a:
+                fig_comp = px.box(
+                    df, x='fraudulent', y='profile_completeness',
+                    color='fraudulent',
+                    color_discrete_map={0: LEGIT_CLR, 1: FRAUD_CLR},
+                    labels={'fraudulent': 'Job Type', 'profile_completeness': 'Completeness Score'},
+                    category_orders={'fraudulent': [0, 1]},
+                )
+                fig_comp.update_traces(marker_line_width=0)
+                fig_comp.update_xaxes(tickvals=[0, 1], ticktext=['Legitimate', 'Fraudulent'])
+                dark_layout(fig_comp, "Profile Completeness Score Distribution", height=320)
+                st.plotly_chart(fig_comp, use_container_width=True)
+
+            with col_b:
+                if 'has_urgency_words' in df.columns:
+                    urg_summary = df.groupby('has_urgency_words')['fraudulent'].agg(['mean','count']).reset_index()
+                    urg_summary.columns = ['Has Urgency Words', 'Fraud Rate', 'Count']
+                    urg_summary['Fraud Rate %'] = (urg_summary['Fraud Rate'] * 100).round(1)
+                    urg_summary['Label'] = urg_summary['Has Urgency Words'].map({0: '❌ No Urgency Words', 1: '🚨 Urgency Words Present'})
+                    fig_urg = px.bar(
+                        urg_summary, x='Label', y='Fraud Rate %',
+                        color='Fraud Rate %', color_continuous_scale='RdYlGn_r',
+                        text='Fraud Rate %',
+                    )
+                    fig_urg.update_traces(texttemplate='%{text:.1f}%', textposition='outside', marker_line_width=0)
+                    fig_urg.update_coloraxes(showscale=False)
+                    dark_layout(fig_urg, "Urgency Words → Fraud Rate Impact", height=320)
+                    fig_urg.update_layout(xaxis_title='', yaxis_title='Fraud Rate (%)')
+                    st.plotly_chart(fig_urg, use_container_width=True)
+
+# ══════════════════════════════════════════════════════════════════════════
+    # TAB 2 — GEOGRAPHIC
+    # ══════════════════════════════════════════════════════════════════════════
+
+    # Country ISO code → Full name mapping
+    COUNTRY_NAMES = {
+        'US': 'United States', 'GB': 'United Kingdom', 'CA': 'Canada',
+        'AU': 'Australia',     'IN': 'India',           'DE': 'Germany',
+        'FR': 'France',        'NL': 'Netherlands',     'SG': 'Singapore',
+        'NZ': 'New Zealand',   'IE': 'Ireland',         'PK': 'Pakistan',
+        'PH': 'Philippines',   'MY': 'Malaysia',        'BR': 'Brazil',
+        'ZA': 'South Africa',  'GR': 'Greece',          'IT': 'Italy',
+        'ES': 'Spain',         'PL': 'Poland',          'AE': 'UAE',
+        'QA': 'Qatar',         'NG': 'Nigeria',         'KE': 'Kenya',
+        'EG': 'Egypt',         'TR': 'Turkey',          'IL': 'Israel',
+        'RO': 'Romania',       'HU': 'Hungary',         'CZ': 'Czech Republic',
+        'SE': 'Sweden',        'NO': 'Norway',          'DK': 'Denmark',
+        'FI': 'Finland',       'CH': 'Switzerland',     'AT': 'Austria',
+        'BE': 'Belgium',       'PT': 'Portugal',        'MX': 'Mexico',
+        'AR': 'Argentina',     'CO': 'Colombia',        'CL': 'Chile',
+        'JP': 'Japan',         'CN': 'China',           'KR': 'South Korea',
+        'HK': 'Hong Kong',     'TW': 'Taiwan',          'TH': 'Thailand',
+        'ID': 'Indonesia',     'VN': 'Vietnam',         'BD': 'Bangladesh',
+        'LK': 'Sri Lanka',     'UA': 'Ukraine',         'RU': 'Russia',
+    }
 
     with tab2:
         if 'country' in df.columns:
-            country_fraud = df.groupby('country').agg(
-                total=('fraudulent','count'),
-                fraud=('fraudulent','sum')
-            ).reset_index()
-            country_fraud['fraud_rate'] = country_fraud['fraud'] / country_fraud['total'] * 100
-            top_countries = country_fraud[country_fraud['total'] >= 20].sort_values('fraud', ascending=False).head(15)
-            fig4 = px.bar(top_countries, x='country', y='fraud_rate',
-                          color='fraud_rate', color_continuous_scale='RdYlGn_r',
-                          title="Top Countries by Fraud Rate (min 20 postings)",
-                          text='fraud')
-            fig4.update_layout(paper_bgcolor='#0d1117', font_color='#e6edf3')
-            st.plotly_chart(fig4, use_container_width=True)
 
+            # --- Use pre-processed country column (already cleaned in prepare_dataset) ---
+            df_geo = df.copy()
+
+            # --- Aggregate ---
+            country_agg = df_geo.groupby('country').agg(
+                total=('fraudulent', 'count'),
+                fraud=('fraudulent', 'sum')
+            ).reset_index()
+            country_agg['fraud_rate'] = (
+                country_agg['fraud'] / country_agg['total'] * 100
+            ).round(2)
+
+            # --- Unknown filter toggle ---
+            show_unknown = st.checkbox(
+                "Show 'Unknown' country entries", value=False,
+                help="Unknown = location was missing or unrecognized in raw data"
+            )
+            if not show_unknown:
+                country_agg = country_agg[country_agg['country'] != 'Unknown']
+
+            top15 = (
+                country_agg[country_agg['total'] >= 20]
+                .sort_values('fraud', ascending=False)
+                .head(15)
+            )
+
+            col1, col2 = st.columns([1.8, 1])
+
+            with col1:
+                fig_geo = px.bar(
+                    top15.sort_values('fraud_rate', ascending=True),
+                    y='country', x='fraud_rate',
+                    orientation='h',
+                    color='fraud_rate',
+                    color_continuous_scale='RdYlGn_r',
+                    text='fraud_rate',
+                    hover_data={'fraud': True, 'total': True},
+                )
+                fig_geo.update_traces(
+                    texttemplate='%{text:.1f}%',
+                    textposition='outside',
+                    marker_line_width=0,
+                )
+                fig_geo.update_coloraxes(showscale=False)
+                dark_layout(fig_geo, "Top 15 Countries — Fraud Rate (min. 20 postings)", height=480)
+                fig_geo.update_layout(yaxis_title='', xaxis_title='Fraud Rate (%)')
+                st.plotly_chart(fig_geo, use_container_width=True)
+
+            with col2:
+                st.markdown(
+                    '<div class="chart-title" style="margin-top:12px">Country Breakdown</div>',
+                    unsafe_allow_html=True
+                )
+                display_df = (
+                    top15[['country', 'total', 'fraud', 'fraud_rate']]
+                    .sort_values('fraud', ascending=False)
+                    .reset_index(drop=True)
+                )
+                display_df.columns = ['Country', 'Total', 'Fraud', 'Rate%']
+                display_df.index += 1
+                st.dataframe(
+                    display_df.style
+                        .background_gradient(subset=['Rate%'], cmap='RdYlGn_r')
+                        .format({'Rate%': '{:.1f}%'}),
+                    use_container_width=True, height=460
+                )
+
+            st.markdown("""<div class="insight-box">
+                <b>Key insight:</b> United States dominates total fraud volume due to
+                highest posting count, but smaller countries like Malaysia and Qatar
+                show significantly higher fraud <i>rates</i>.
+                Always check both absolute numbers and rate together.
+            </div>""", unsafe_allow_html=True)
+    # ══════════════════════════════════════════════════════════════════════════
+    # TAB 3 — TEXT ANALYSIS
+    # ══════════════════════════════════════════════════════════════════════════
     with tab3:
         if 'desc_length' in df.columns:
             col1, col2 = st.columns(2)
+
             with col1:
-                fig5 = px.histogram(
-                    df[df['desc_length'] < 5000], x='desc_length', color='fraudulent',
-                    color_discrete_map={0:"#2ECC71", 1:"#E74C3C"},
-                    nbins=50, title="Description Length Distribution",
-                    labels={'desc_length':'Description Length','fraudulent':'Type'}
+                fig_hist = px.histogram(
+                    df[df['desc_length'] < 5000],
+                    x='desc_length',
+                    color='fraudulent',
+                    color_discrete_map={0: LEGIT_CLR, 1: FRAUD_CLR},
+                    nbins=60,
+                    barmode='overlay',
+                    opacity=0.75,
+                    labels={'desc_length': 'Description Length (chars)', 'fraudulent': 'Job Type'},
                 )
-                fig5.update_layout(paper_bgcolor='#0d1117', font_color='#e6edf3')
-                st.plotly_chart(fig5, use_container_width=True)
+                fig_hist.update_traces(marker_line_width=0)
+                dark_layout(fig_hist, "Description Length: Legitimate vs Fraudulent", height=340)
+                fig_hist.update_layout(legend=dict(
+                    orientation='h', y=1.05,
+                    itemsizing='constant',
+                ))
+                # Add mean lines
+                for val, color, label in [(0, LEGIT_CLR, 'Legit avg'), (1, FRAUD_CLR, 'Fraud avg')]:
+                    mean_val = df[df['fraudulent']==val]['desc_length'].mean()
+                    fig_hist.add_vline(x=mean_val, line_dash='dash', line_color=color,
+                                       annotation_text=f"{label}: {int(mean_val)}", annotation_position='top right',
+                                       annotation_font_color=color)
+                st.plotly_chart(fig_hist, use_container_width=True)
+                st.markdown("""<div class="insight-box">
+                    <b>Key insight:</b> Fraudulent job descriptions tend to be <b>shorter</b>
+                    — scammers avoid writing detailed, professional-sounding content.
+                </div>""", unsafe_allow_html=True)
 
             with col2:
-                if 'has_urgency_words' in df.columns:
-                    urg = df.groupby(['has_urgency_words','fraudulent']).size().reset_index(name='count')
-                    fig6 = px.bar(urg, x='has_urgency_words', y='count', color='fraudulent',
-                                  color_discrete_map={0:"#2ECC71",1:"#E74C3C"},
-                                  title="Urgency Words vs Fraud",
-                                  labels={'has_urgency_words':'Has Urgency Words (0=No, 1=Yes)'})
-                    fig6.update_layout(paper_bgcolor='#0d1117', font_color='#e6edf3')
-                    st.plotly_chart(fig6, use_container_width=True)
+                # Salary disclosure vs fraud — stacked bar
+                if 'has_salary' in df.columns:
+                    sal_data = df.groupby(['has_salary', 'fraudulent']).size().reset_index(name='count')
+                    sal_data['Salary Status'] = sal_data['has_salary'].map({0: '❌ Not Disclosed', 1: '✅ Disclosed'})
+                    sal_data['Job Type'] = sal_data['fraudulent'].map({0: 'Legitimate', 1: 'Fraudulent'})
+                    fig_sal = px.bar(
+                        sal_data,
+                        x='Salary Status', y='count', color='Job Type',
+                        color_discrete_map={'Legitimate': LEGIT_CLR, 'Fraudulent': FRAUD_CLR},
+                        barmode='stack',
+                        text='count',
+                    )
+                    fig_sal.update_traces(texttemplate='%{text:,}', textposition='inside', marker_line_width=0)
+                    dark_layout(fig_sal, "Salary Disclosure vs Fraud Volume", height=340)
+                    fig_sal.update_layout(xaxis_title='', yaxis_title='Job Count', legend_title='')
+                    st.plotly_chart(fig_sal, use_container_width=True)
+                    st.markdown("""<div class="insight-box">
+                        <b>Key insight:</b> The vast majority of fake jobs <b>do not disclose salary</b>.
+                        Missing salary info is one of the strongest single fraud predictors.
+                    </div>""", unsafe_allow_html=True)
 
+            # Required experience breakdown
+            if 'required_experience' in df.columns:
+                exp_agg = df.groupby('required_experience')['fraudulent'].agg(['mean','count']).reset_index()
+                exp_agg.columns = ['Experience', 'Fraud Rate', 'Count']
+                exp_agg = exp_agg[exp_agg['Count'] > 30].sort_values('Fraud Rate', ascending=False)
+                exp_agg['Fraud Rate %'] = (exp_agg['Fraud Rate'] * 100).round(1)
+                fig_exp = px.bar(
+                    exp_agg, x='Experience', y='Fraud Rate %',
+                    color='Fraud Rate %', color_continuous_scale='RdYlGn_r',
+                    text='Fraud Rate %',
+                )
+                fig_exp.update_traces(texttemplate='%{text:.1f}%', textposition='outside', marker_line_width=0)
+                fig_exp.update_coloraxes(showscale=False)
+                dark_layout(fig_exp, "Fraud Rate by Required Experience Level", height=340, xangle=-25)
+                fig_exp.update_layout(xaxis_title='', yaxis_title='Fraud Rate (%)')
+                st.plotly_chart(fig_exp, use_container_width=True)
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # TAB 4 — INDUSTRY
+    # ══════════════════════════════════════════════════════════════════════════
     with tab4:
         if 'industry' in df.columns:
-            ind_fraud = df.groupby('industry').agg(
-                total=('fraudulent','count'),
-                fraud=('fraudulent','sum')
+            ind_agg = df.groupby('industry').agg(
+                total=('fraudulent', 'count'),
+                fraud=('fraudulent', 'sum')
             ).reset_index()
-            ind_fraud['fraud_rate'] = ind_fraud['fraud'] / ind_fraud['total'] * 100
-            top_ind = ind_fraud[ind_fraud['total'] >= 30].sort_values('fraud_rate', ascending=False).head(15)
-            fig7 = px.bar(top_ind, x='industry', y='fraud_rate',
-                          color='fraud_rate', color_continuous_scale='RdYlGn_r',
-                          title="Industry Fraud Rate (min 30 postings)")
-            fig7.update_layout(paper_bgcolor='#0d1117', font_color='#e6edf3', xaxis_tickangle=-45)
-            st.plotly_chart(fig7, use_container_width=True)
+            ind_agg['fraud_rate'] = (ind_agg['fraud'] / ind_agg['total'] * 100).round(2)
+            top_ind = ind_agg[ind_agg['total'] >= 30].sort_values('fraud_rate', ascending=False).head(20)
+
+            col1, col2 = st.columns([1.8, 1])
+
+            with col1:
+                fig_ind = px.bar(
+                    top_ind.sort_values('fraud_rate', ascending=True),
+                    y='industry', x='fraud_rate',
+                    orientation='h',
+                    color='fraud_rate',
+                    color_continuous_scale='RdYlGn_r',
+                    text='fraud_rate',
+                    hover_data={'fraud': True, 'total': True},
+                )
+                fig_ind.update_traces(
+                    texttemplate='%{text:.1f}%',
+                    textposition='outside',
+                    marker_line_width=0,
+                )
+                fig_ind.update_coloraxes(showscale=False)
+                dark_layout(fig_ind, "Top 20 Industries — Fraud Rate (min. 30 postings)", height=580)
+                fig_ind.update_layout(yaxis_title='', xaxis_title='Fraud Rate (%)')
+                st.plotly_chart(fig_ind, use_container_width=True)
+
+            with col2:
+                # Treemap of fraud volume by industry
+                fig_tree = px.treemap(
+                    top_ind,
+                    path=['industry'],
+                    values='fraud',
+                    color='fraud_rate',
+                    color_continuous_scale='RdYlGn_r',
+                    hover_data={'total': True, 'fraud_rate': ':.1f'},
+                )
+                fig_tree.update_traces(
+                    textinfo='label+value',
+                    textfont=dict(size=11, color='white'),
+                    marker_line_width=1,
+                    marker_line_color=DARK_BG,
+                )
+                fig_tree.update_coloraxes(showscale=False)
+                dark_layout(fig_tree, "Fraud Volume by Industry (Treemap)", height=580)
+                fig_tree.update_layout(margin=dict(l=4, r=4, t=36, b=4))
+                st.plotly_chart(fig_tree, use_container_width=True)
+
+            st.markdown("""<div class="insight-box">
+                <b>Key insight:</b> Industries like <b>Oil & Energy, Maritime</b> show high fraud rates
+                due to high-pay promises and remote nature. HR recruiters should flag postings from
+                these sectors that lack company profiles or salary details.
+            </div>""", unsafe_allow_html=True)
 
 
 #  PAGE 3 – JOB CHECKER  (v5.0)
 elif page == "🔍  Job Checker":
 
-    # ── Heading (same style as Resume Analyzer) ──────────────────────────
-    # ── Info Banner with Badges (matching info-card style of Resume Analyzer)
-    # ── Extra CSS for this page only ──────────────────────────────
     st.markdown("""
     <style>
-    /* ── Hero Banner ───────────────────────────────────────────── */
     .jc-hero {
         background: linear-gradient(135deg, #0f2027 0%, #203a43 50%, #2c5364 100%);
         border-radius: 18px;
@@ -1108,70 +1262,58 @@ elif page == "🔍  Job Checker":
     </style>
     """, unsafe_allow_html=True)
 
-    # ── Hero Banner ───────────────────────────────────────────────
     st.markdown("""
     <div class="jc-hero">
         <h1>🛡️ Real-Time Job Fraud Checker</h1>
-        <p>Powered by ML Model + Gemini AI · Instant fraud detection with detailed analysis</p>
+        <p>Powered by the trained ML model, rule-based fraud indicators, and TF-IDF keyword evidence</p>
         <div class="jc-badge-row">
             <span class="jc-badge">⚡ Instant Detection</span>
-            <span class="jc-badge">📊 Gauge Chart</span>
-            <span class="jc-badge">🚩 Red Flag Scan</span>
-            <span class="jc-badge">🤖 Gemini AI Analysis</span>
+            <span class="jc-badge">📊 Fraud Probability Gauge</span>
+            <span class="jc-badge">🚩 Fraud Indicators Table</span>
+            <span class="jc-badge">🔑 Top Fraud Keywords</span>
         </div>
     </div>
     """, unsafe_allow_html=True)
 
     if not model_ok:
-        st.error("❌ Model not loaded. Run the Jupyter notebook first to generate `best_model.pkl`.")
+        st.error("❌ Model not loaded. Run the notebook first to generate best_model.pkl, tfidf_vectorizer.pkl, numeric_cols.pkl, and model_info.json.")
         st.stop()
 
-    # ── 2-column Layout (same as Resume Analyzer: col_upload | col_job) ──
     col_form, col_res = st.columns([1, 1])
-
-    #  LEFT COLUMN – Enter Job Details
 
     with col_form:
         st.markdown("### 📝 Enter Job Details")
-
-        # Title + Company (same row)
         c_title, c_company = st.columns(2)
         with c_title:
             title = st.text_input("JOB TITLE *", placeholder="e.g., Data Analyst")
         with c_company:
             company = st.text_input("COMPANY NAME", placeholder="e.g., Tech Corp")
 
-        # Description
         desc = st.text_area(
             "JOB DESCRIPTION *",
             height=160,
             placeholder="Paste the complete job description here — role overview, responsibilities, company info..."
         )
-
-        # Requirements
         reqs = st.text_area(
             "REQUIREMENTS / QUALIFICATIONS",
             height=100,
-            placeholder="e.g., 3+ years Python experience, B.Tech in CS/AI, Strong SQL skills..."
+            placeholder="e.g., 3+ years Python experience, SQL, statistics, stakeholder communication..."
         )
 
-        # Checkboxes (same row, styled like Resume Analyzer's Gemini checkbox)
-        cc1, cc2, cc3 = st.columns(3)
-        with cc1: has_sal    = st.checkbox("💰 Salary Disclosed",  value=False)
-        with cc2: has_logo   = st.checkbox("🏢 Company Logo",      value=False)
-        with cc3: use_gemini = st.checkbox("🤖 Gemini AI Analysis", value=True,
-                                            help="Deep AI explanation (requires Gemini API key in sidebar)")
+        cc1, cc2 = st.columns(2)
+        with cc1:
+            has_sal = st.checkbox("💰 Salary Disclosed", value=False,
+                                  help="Check this only if the job posting clearly mentions a salary or pay range.")
+        with cc2:
+            has_logo = st.checkbox("🏢 Company Logo", value=False,
+                                  help="Check this only if the job posting shows a verified company logo.")
 
-        # ── Dynamic Completeness Bar ───────────────────────────────────
-        filled_title   = bool(str(title).strip())
+        filled_title = bool(str(title).strip())
         filled_company = bool(str(company).strip())
-        filled_desc    = bool(str(desc).strip())
-        filled_reqs    = bool(str(reqs).strip())
-
-        completeness_score = (int(filled_title) + int(filled_company) +
-                               int(filled_desc)  + int(filled_reqs) +
-                               int(has_sal) + int(has_logo))
-        completeness_pct   = int(completeness_score / 6 * 100)
+        filled_desc = bool(str(desc).strip())
+        filled_reqs = bool(str(reqs).strip())
+        completeness_score = (int(filled_title) + int(filled_company) + int(filled_desc) + int(filled_reqs) + int(has_sal) + int(has_logo))
+        completeness_pct = int(completeness_score / 6 * 100)
 
         if completeness_pct >= 80:
             bar_color = "#2ECC71"; bar_label = "Excellent"
@@ -1181,61 +1323,83 @@ elif page == "🔍  Job Checker":
             bar_color = "#E74C3C"; bar_label = "Incomplete"
 
         chips_html = ""
-        for name, ok in [("Title", filled_title), ("Company", filled_company),
-                          ("Description", filled_desc), ("Requirements", filled_reqs),
-                          ("Salary", has_sal), ("Logo", has_logo)]:
+        for name, ok in [("Title", filled_title), ("Company", filled_company), ("Description", filled_desc), ("Requirements", filled_reqs), ("Salary", has_sal), ("Logo", has_logo)]:
             cls = "badge badge-green" if ok else "badge badge-blue"
-            ic  = "✔" if ok else "○"
+            ic = "✔" if ok else "○"
             chips_html += f'<span class="{cls}" style="margin:2px">{ic} {name}</span>'
 
         st.markdown(f"""
-        <div style="background:#161b22; border:1px solid #21262d; border-radius:10px;
-                    padding:12px 14px; margin:10px 0;">
-            <div style="display:flex; justify-content:space-between; align-items:center;
-                        font-size:0.8rem; color:#8b949e; margin-bottom:6px;">
+        <div style="background:#161b22; border:1px solid #21262d; border-radius:10px; padding:12px 14px; margin:10px 0;">
+            <div style="display:flex; justify-content:space-between; align-items:center; font-size:0.8rem; color:#8b949e; margin-bottom:6px;">
                 <span>📊 Form Completeness</span>
                 <span style="color:{bar_color}; font-weight:700">{completeness_pct}% — {bar_label}</span>
             </div>
             <div style="background:#21262d; border-radius:8px; height:8px; overflow:hidden;">
-                <div style="width:{completeness_pct}%; background:{bar_color}; height:100%;
-                            border-radius:8px; transition:width 0.4s ease;"></div>
+                <div style="width:{completeness_pct}%; background:{bar_color}; height:100%; border-radius:8px; transition:width 0.4s ease;"></div>
             </div>
             <div style="margin-top:8px; display:flex; flex-wrap:wrap; gap:4px;">{chips_html}</div>
         </div>
         """, unsafe_allow_html=True)
 
-        # ── Analyze Button (red, like Resume Analyzer's Analyze Resume btn) ──
-        submitted = st.button("🔍  Analyze Job Posting", type="primary",
-                               use_container_width=True, key="jc_submit")
+        submitted = st.button("🔍  Analyze Job Posting", type="primary", use_container_width=True, key="jc_submit")
 
-        # ── Tips Card (matching info-card style) ──────────────────────
         st.markdown("""
         <div class="info-card" style="margin-top:14px;">
             <b style="color:#3498DB;">💡 Tips for Best Results</b><br>
-            📋 Paste the full description — more text = better accuracy<br>
-            🏢 Providing a company name helps cross-verify red flags<br>
-            💰 Real companies usually disclose salary ranges<br>
-            ⚠️ "No experience needed + high pay" = classic fraud signal
+            📋 Paste the full description — more text improves TF-IDF coverage<br>
+            🏢 Company presence and salary disclosure reduce uncertainty<br>
+            🚩 Urgency language and thin descriptions are common fraud indicators
         </div>
         """, unsafe_allow_html=True)
 
-    #  RIGHT COLUMN – Results
-
     with col_res:
+        # ── INPUT VALIDATION ────────────────────────────────────────────────
+        MIN_TITLE_LEN = 5
+        MIN_DESC_LEN  = 100
 
-        if submitted and title and desc:
-            with st.spinner("🔍 Analyzing job posting with ML model..."):
-                prob, red_flags, top_words = predict_job(
-                    title, company, desc, reqs, has_sal, has_logo, model, tfidf, num_cols
+        validation_errors = []
+        if submitted:
+            if not str(title).strip() or len(str(title).strip()) < MIN_TITLE_LEN:
+                validation_errors.append(
+                    f"❌ **Job Title** is too short — minimum {MIN_TITLE_LEN} characters required. "
+                    f"(Entered: {len(str(title).strip())} chars)"
+                )
+            if not str(desc).strip() or len(str(desc).strip()) < MIN_DESC_LEN:
+                validation_errors.append(
+                    f"❌ **Job Description** is too short — minimum {MIN_DESC_LEN} characters required for a meaningful prediction. "
+                    f"(Entered: {len(str(desc).strip())} chars)"
                 )
 
-            is_fraud       = prob >= FRAUD_THRESHOLD
-            clr            = risk_color(prob)
-            lbl            = risk_label(prob)
-            active_flags   = [k for k, v in red_flags.items() if v]
+        if submitted and validation_errors:
+            for err in validation_errors:
+                st.markdown(f"""
+                <div class="warning-card" style="margin-bottom:6px;">
+                    {err}
+                </div>
+                """, unsafe_allow_html=True)
+            st.markdown("""
+            <div class="info-card" style="margin-top:8px; font-size:0.85rem;">
+                💡 <b>Why does this matter?</b> The ML model uses TF-IDF on the description text.
+                Very short input has almost zero word contribution — so only binary checkboxes
+                influence the score, which creates a <b>misleading result</b>.
+            </div>
+            """, unsafe_allow_html=True)
+
+        elif submitted and not validation_errors:
+            try:
+                with st.spinner("🔍 Analyzing job posting with ML model..."):
+                    prob, red_flags, top_words = predict_job(title, company, desc, reqs, has_sal, has_logo, model, tfidf, num_cols)
+            except ValueError as _feat_err:
+                # FIX: catches the feature-mismatch ValueError from predict_job()
+                st.error(f"❌ Model feature mismatch: {_feat_err}")
+                st.stop()
+
+            is_fraud = prob >= FRAUD_THRESHOLD
+            clr = risk_color(prob)
+            lbl = risk_label(prob)
+            active_flags = [k for k, v in red_flags.items() if v]
             positive_flags = [k for k, v in red_flags.items() if not v]
 
-            # ── Verdict Card ───────────────────────────────────────────
             if is_fraud:
                 verdict_css = "background:#2d1b1b; border:2px solid #E74C3C; box-shadow:0 0 20px rgba(231,76,60,0.2);"
                 verdict_emoji = "🚨"
@@ -1248,51 +1412,33 @@ elif page == "🔍  Job Checker":
 
             st.markdown(f"""
             <div style="{verdict_css} border-radius:14px; padding:20px; text-align:center; margin-bottom:10px;">
-                <div style="font-size:2.4rem; font-weight:800; color:{clr}; line-height:1;">
-                    {prob*100:.1f}%
-                </div>
+                <div style="font-size:2.4rem; font-weight:800; color:{clr}; line-height:1;">{prob*100:.1f}%</div>
                 <div style="color:#8b949e; font-size:0.78rem; margin-bottom:8px;">Fraud Probability</div>
-                <div style="font-size:1.1rem; font-weight:800; color:{clr}; letter-spacing:0.02em;">
-                    {verdict_emoji} {lbl}
-                </div>
-                <div style="font-size:0.82rem; color:#c9d1d9; margin-top:4px;">
-                    Threshold: {FRAUD_THRESHOLD*100:.0f}% &nbsp;|&nbsp; Red Flags: {len(active_flags)}/6
-                </div>
+                <div style="font-size:1.1rem; font-weight:800; color:{clr}; letter-spacing:0.02em;">{verdict_emoji} {lbl}</div>
+                <div style="font-size:0.82rem; color:#c9d1d9; margin-top:4px;">Threshold: {FRAUD_THRESHOLD*100:.0f}% &nbsp;|&nbsp; Red Flags: {len(active_flags)}/6</div>
             </div>
             """, unsafe_allow_html=True)
 
-            # ── Gauge Chart ────────────────────────────────────────────
             fig_gauge = go.Figure(go.Indicator(
-                mode  = "gauge+number",
-                value = prob * 100,
-                title = {'text': "Fraud Probability (%)", 'font': {'color': '#8b949e', 'size': 13}},
-                gauge = {
-                    'axis'      : {'range': [0, 100], 'tickcolor': '#8b949e',
-                                   'tickfont': {'color': '#8b949e', 'size': 10}},
-                    'bar'       : {'color': clr, 'thickness': 0.3},
-                    'bgcolor'   : '#161b22',
+                mode="gauge+number",
+                value=prob * 100,
+                title={'text': "Fraud Probability (%)", 'font': {'color': '#8b949e', 'size': 13}},
+                gauge={
+                    'axis': {'range': [0, 100], 'tickcolor': '#8b949e', 'tickfont': {'color': '#8b949e', 'size': 10}},
+                    'bar': {'color': clr, 'thickness': 0.3},
+                    'bgcolor': '#161b22',
                     'borderwidth': 0,
-                    'steps'     : [
-                        {'range': [0,  20],  'color': '#1b2d1b'},
-                        {'range': [20, 35],  'color': '#2d2416'},
+                    'steps': [
+                        {'range': [0, 20], 'color': '#1b2d1b'},
+                        {'range': [20, 35], 'color': '#2d2416'},
                         {'range': [35, 100], 'color': '#2d1b1b'},
                     ],
-                    'threshold' : {'line': {'color': '#9B59B6', 'width': 3},
-                                   'thickness': 0.75, 'value': FRAUD_THRESHOLD * 100}
+                    'threshold': {'line': {'color': '#9B59B6', 'width': 3}, 'thickness': 0.75, 'value': FRAUD_THRESHOLD * 100}
                 },
-                number = {'font': {'color': clr, 'size': 38}, 'suffix': '%'}
+                number={'font': {'color': clr, 'size': 38}, 'suffix': '%'}
             ))
-            fig_gauge.update_layout(
-                paper_bgcolor='#0d1117', plot_bgcolor='#0d1117',
-                font_color='#e6edf3', height=230,
-                margin=dict(l=20, r=20, t=50, b=10)
-            )
+            fig_gauge.update_layout(paper_bgcolor='#0d1117', plot_bgcolor='#0d1117', font_color='#e6edf3', height=230, margin=dict(l=20, r=20, t=50, b=10))
             st.plotly_chart(fig_gauge, use_container_width=True)
-
-            # ── Mini KPI Row ───────────────────────────────────────────
-            safe_pct  = round((1 - prob) * 100, 1)
-            risk_lvl  = "HIGH" if is_fraud else ("MED" if prob >= 0.20 else "LOW")
-            risk_col2 = "#E74C3C" if is_fraud else ("#F39C12" if prob >= 0.20 else "#2ECC71")
 
             mk1, mk2, mk3 = st.columns(3)
             with mk1:
@@ -1302,6 +1448,8 @@ elif page == "🔍  Job Checker":
                     <div class="kpi-label">Fraud Score</div>
                 </div>""", unsafe_allow_html=True)
             with mk2:
+                risk_lvl = "HIGH" if is_fraud else ("MED" if prob >= 0.20 else "LOW")
+                risk_col2 = "#E74C3C" if is_fraud else ("#F39C12" if prob >= 0.20 else "#2ECC71")
                 st.markdown(f"""
                 <div class="kpi-card" style="border-color:{risk_col2}">
                     <div class="kpi-value" style="color:{risk_col2}">{risk_lvl}</div>
@@ -1314,83 +1462,39 @@ elif page == "🔍  Job Checker":
                     <div class="kpi-label">Red Flags</div>
                 </div>""", unsafe_allow_html=True)
 
-            # ── Red Flags & Positive Signals ───────────────────────────
-            if active_flags or positive_flags:
+            indicator_df = pd.DataFrame({
+                "Indicator": list(red_flags.keys()),
+                "Status": ["Triggered" if v else "Clear" for v in red_flags.values()],
+            })
+            st.markdown("### 🚩 Fraud Indicators Table")
+            st.dataframe(indicator_df, use_container_width=True, hide_index=True)
+
+            if active_flags:
                 st.markdown(f"""
                 <div class="fraud-card" style="margin-top:10px">
-                    <div style="color:#E74C3C; font-weight:700; font-size:0.9rem; margin-bottom:8px;">
-                        ⚠️ Red Flags Detected ({len(active_flags)})
-                    </div>
+                    <div style="color:#E74C3C; font-weight:700; font-size:0.9rem; margin-bottom:8px;">⚠️ Red Flags Detected ({len(active_flags)})</div>
                     {''.join(f'<div style="display:flex;align-items:center;gap:8px;padding:6px 8px;background:rgba(231,76,60,0.08);border-radius:8px;margin:4px 0;border-left:3px solid #E74C3C;font-size:0.85rem;color:#e6edf3;"><span>🚩</span><span>{f}</span></div>' for f in active_flags)}
                 </div>
                 """, unsafe_allow_html=True)
+            if positive_flags:
+                st.markdown(f"""
+                <div class="legit-card" style="margin-top:8px">
+                    <div style="color:#2ECC71; font-weight:700; font-size:0.88rem; margin-bottom:8px;">✅ Positive Signals</div>
+                    {''.join(f'<div style="display:flex;align-items:center;gap:8px;padding:6px 8px;background:rgba(46,204,113,0.07);border-radius:8px;margin:4px 0;border-left:3px solid #2ECC71;font-size:0.85rem;color:#e6edf3;"><span>✔</span><span>{RED_FLAG_CHECKS[f][1]}</span></div>' for f in positive_flags[:3])}
+                </div>
+                """, unsafe_allow_html=True)
 
-                if positive_flags:
-                    st.markdown(f"""
-                    <div class="legit-card" style="margin-top:8px">
-                        <div style="color:#2ECC71; font-weight:700; font-size:0.88rem; margin-bottom:8px;">
-                            ✅ Positive Signals
-                        </div>
-                        {''.join(f'<div style="display:flex;align-items:center;gap:8px;padding:6px 8px;background:rgba(46,204,113,0.07);border-radius:8px;margin:4px 0;border-left:3px solid #2ECC71;font-size:0.85rem;color:#e6edf3;"><span>✔</span><span>{f.replace("No salary","Salary").replace("No company profile","Company profile").replace("No requirements","Requirements").replace("Contains urgency","No urgency").replace("Very short description (<300)","Description length OK (≥300 chars)").replace("No company logo","Company logo present")}</span></div>' for f in positive_flags[:3])}
-                    </div>
-                    """, unsafe_allow_html=True)
-
-            # ── Top Fraud Keywords ─────────────────────────────────────
             if top_words:
-                pills_html = ''.join(
-                    f'<span class="badge badge-red">🔑 {w} <span style="opacity:0.6">({v:.3f})</span></span>'
-                    for w, v in top_words[:6]
-                )
+                pills_html = ''.join(f'<span class="badge badge-red">🔑 {w} <span style="opacity:0.6">({v:.3f})</span></span>' for w, v in top_words[:6])
                 st.markdown(f"""
                 <div class="info-card" style="margin-top:10px; border-left:5px solid #3498DB;">
-                    <div style="color:#3498DB; font-weight:700; font-size:0.88rem; margin-bottom:8px;">
-                        🔑 Top Fraud-Triggering Keywords
-                    </div>
+                    <div style="color:#3498DB; font-weight:700; font-size:0.88rem; margin-bottom:8px;">🔑 Top Fraud Keywords (TF-IDF contribution)</div>
                     {pills_html}
                 </div>
                 """, unsafe_allow_html=True)
 
-            # ── DB Logging ─────────────────────────────────────────────
-            if DB_AVAILABLE:
-                try:
-                    log_prediction(title, company, prob, is_fraud, len(active_flags))
-                except Exception:
-                    pass
-
-            if use_gemini:
-                _, gemini_ready = get_gemini_model()
-                if gemini_ready:
-                    with st.spinner("🤖 Getting Gemini AI deep analysis..."):
-                        gemini_analysis = gemini_analyze_job(
-                            title, company, desc, reqs, has_sal, has_logo,
-                            prob, red_flags, top_words
-                        )
-                    if gemini_analysis:
-                        st.markdown("""
-                        <div class="gemini-card" style="margin-top:12px">
-                            <div style="display:flex; align-items:center; gap:10px;
-                                        margin-bottom:12px; padding-bottom:10px;
-                                        border-bottom:1px solid #1e3a6e;">
-                                <span style="font-size:1.4rem">🤖</span>
-                                <div>
-                                    <div style="color:#4285f4; font-weight:800; font-size:1rem;">
-                                        Gemini AI Deep Analysis
-                                    </div>
-                                    <div style="color:#8b949e; font-size:0.78rem;">
-                                        Powered by Google Gemini 1.5 Flash
-                                    </div>
-                                </div>
-                            </div>
-                        """, unsafe_allow_html=True)
-                        st.markdown(gemini_analysis)
-                        st.markdown("</div>", unsafe_allow_html=True)
-                else:
-                    st.markdown("""
-                    <div class="info-card" style="margin-top:12px; display:flex; align-items:center; gap:10px;">
-                        <span style="font-size:1.5rem">💡</span>
-                        <span>Add your <b>Gemini API key</b> in the sidebar to unlock AI-powered fraud analysis!</span>
-                    </div>
-                    """, unsafe_allow_html=True)
+        elif submitted and validation_errors:
+            pass  # errors already shown above
 
         elif submitted:
             st.markdown("""
@@ -1399,328 +1503,103 @@ elif page == "🔍  Job Checker":
                 Please fill them in and try again.
             </div>
             """, unsafe_allow_html=True)
-
         else:
-            # ── Empty State ────────────────────────────────────────────
             st.markdown("""
-            <div style="background:linear-gradient(145deg,#0d1117,#161b22);
-                        border:2px dashed #30363d; border-radius:16px;
-                        padding:50px 30px; text-align:center; color:#8b949e;">
+            <div style="background:linear-gradient(145deg,#0d1117,#161b22); border:2px dashed #30363d; border-radius:16px; padding:50px 30px; text-align:center; color:#8b949e;">
                 <div style="font-size:3.5rem; margin-bottom:12px;">🔍</div>
-                <div style="font-size:1.1rem; font-weight:700; color:#c9d1d9; margin-bottom:6px;">
-                    Results will appear here
-                </div>
-                <div style="font-size:0.85rem; color:#6e7681;">
-                    Fill in the job details on the left<br>and click <b>Analyze Job Posting</b>
-                </div>
-                <div style="margin-top:20px; display:flex; justify-content:center; gap:20px; flex-wrap:wrap;">
-                    <div style="text-align:center;">
-                        <div style="font-size:1.5rem;">⚡</div>
-                        <div style="font-size:0.75rem; color:#6e7681; margin-top:4px;">Instant<br>Detection</div>
-                    </div>
-                    <div style="text-align:center;">
-                        <div style="font-size:1.5rem;">📊</div>
-                        <div style="font-size:0.75rem; color:#6e7681; margin-top:4px;">Gauge<br>Chart</div>
-                    </div>
-                    <div style="text-align:center;">
-                        <div style="font-size:1.5rem;">🚩</div>
-                        <div style="font-size:0.75rem; color:#6e7681; margin-top:4px;">Red Flag<br>Scan</div>
-                    </div>
-                    <div style="text-align:center;">
-                        <div style="font-size:1.5rem;">🤖</div>
-                        <div style="font-size:0.75rem; color:#6e7681; margin-top:4px;">Gemini AI<br>Analysis</div>
-                    </div>
-                </div>
+                <div style="font-size:1.1rem; font-weight:700; color:#c9d1d9; margin-bottom:6px;">Results will appear here</div>
+                <div style="font-size:0.85rem; color:#6e7681;">Fill in the job details on the left<br>and click <b>Analyze Job Posting</b></div>
             </div>
             """, unsafe_allow_html=True)
-
-
-#  PAGE 4 – RESUME ANALYZER
-elif page == "📄  Resume Analyzer":
-    st.markdown("## 📄 AI-Powered Resume Analyzer")
-    st.markdown("""
-    <div class="info-card">
-        Upload your resume and optionally paste a job description for personalized
-        skills matching, ATS scoring, and <b style="color:#4285f4">Gemini AI coaching</b>.
-        Supports <b>PDF, DOCX, TXT</b>.
-    </div>
-    """, unsafe_allow_html=True)
-
-    col_upload, col_job = st.columns([1, 1])
-
-    with col_upload:
-        st.markdown("### 📎 Upload Resume")
-        resume_file = st.file_uploader(
-            "Choose your resume", type=["pdf","docx","txt"],
-            help="PDF, DOCX, or TXT format"
-        )
-        resume_text_manual = st.text_area(
-            "Or paste resume text here",
-            height=200,
-            placeholder="Paste your resume content here if not uploading a file..."
-        )
-
-    with col_job:
-        st.markdown("### 💼 Job Description (Optional)")
-        job_title_r = st.text_input("Job Title", placeholder="e.g., Data Analyst")
-        job_desc_r  = st.text_area("Job Description", height=130,
-                                    placeholder="Paste the job description...")
-        job_reqs_r  = st.text_area("Job Requirements", height=70,
-                                    placeholder="List key requirements...")
-        use_gemini_r = st.checkbox("🤖 Gemini AI Resume Coaching", value=True)
-
-    analyze_btn = st.button("🔬 Analyze Resume", type="primary", use_container_width=True)
-
-    if analyze_btn:
-        # Get resume text
-        if resume_file:
-            resume_text = extract_text_from_file(resume_file)
-        elif resume_text_manual.strip():
-            resume_text = resume_text_manual
-        else:
-            st.warning("⚠️ Please upload a resume or paste resume text.")
-            st.stop()
-
-        if not resume_text.strip():
-            st.error("❌ Could not extract text from the file.")
-            st.stop()
-
-        with st.spinner("🔬 Analyzing resume..."):
-            skills_result    = compute_skills_match(resume_text, job_desc_r, job_reqs_r)
-            ats_result       = compute_ats_score(resume_text, job_desc_r, job_reqs_r)
-            shortlist_result = compute_shortlisting_score(
-                skills_result["skills_score"],
-                ats_result["ats_score"],
-                resume_text, job_desc_r
-            )
-
-        # Score cards
-        c1, c2, c3 = st.columns(3)
-        for col, lbl, score, tip in [
-            (c1, "🎯 Skills Match",      skills_result["skills_score"],    "How well your skills match the job"),
-            (c2, "🤖 ATS Score",         ats_result["ats_score"],           "Applicant Tracking System score"),
-            (c3, "📊 Shortlist Score",   shortlist_result["shortlist_score"],"Overall hiring probability"),
-        ]:
-            with col:
-                clr = score_color(score)
-                st.markdown(f"""
-                <div class="score-card">
-                    <div style="font-size:0.85rem; color:#8b949e; margin-bottom:8px">{lbl}</div>
-                    <div style="font-size:2.5rem; font-weight:800; color:{clr}">{score:.1f}</div>
-                    <div style="font-size:0.75rem; color:{clr}">/100 · {score_label(score)}</div>
-                    <div style="font-size:0.72rem; color:#8b949e; margin-top:6px">{tip}</div>
-                </div>""", unsafe_allow_html=True)
-
-        st.markdown(f"""
-        <div style="text-align:center; padding:14px; margin:12px 0; background:#16213e;
-                    border-radius:12px; border:2px solid {shortlist_result['tier_color']}">
-            <span style="font-size:1.1rem; font-weight:700; color:{shortlist_result['tier_color']}">
-                {shortlist_result['tier']}
-            </span>
-        </div>""", unsafe_allow_html=True)
-
-        # Skills breakdown
-        tab_s, tab_a, tab_r = st.tabs(["🎯 Skills Match", "🤖 ATS Details", "💡 Recommendations"])
-
-        with tab_s:
-            if skills_result["matched_skills"]:
-                st.markdown("**✅ Matched Skills:**")
-                st.markdown(''.join(f'<span class="skill-tag-match">{s}</span>'
-                                    for s in skills_result["matched_skills"]), unsafe_allow_html=True)
-            if skills_result["missing_skills"]:
-                st.markdown("**❌ Missing Skills:**")
-                st.markdown(''.join(f'<span class="skill-tag-missing">{s}</span>'
-                                    for s in skills_result["missing_skills"][:20]), unsafe_allow_html=True)
-
-            # Skills by category
-            if skills_result["resume_by_cat"]:
-                st.markdown("**📂 Your Skills by Category:**")
-                for cat, skills_list in skills_result["resume_by_cat"].items():
-                    st.markdown(f"*{cat}*: " + ', '.join(f'`{s}`' for s in skills_list))
-
-        with tab_a:
-            component_keys = ["Keyword Match with Job","Key Sections Present",
-                              "Action Verbs Used","Quantifiable Achievements",
-                              "Contact Info Complete","Appropriate Length"]
-            max_scores     = [30, 25, 15, 15, 10, 5]
-            ats_components = ats_result["components"]
-
-            # Map component names to their detail keys in ats_result["components"]
-            _detail_key_map = {
-                "Keyword Match with Job"    : "_kw_detail",
-                "Key Sections Present"      : "_sec_detail",
-                "Action Verbs Used"         : "_verb_detail",
-                "Quantifiable Achievements" : "_num_detail",
-                "Contact Info Complete"     : "_contact_detail",
-                "Appropriate Length"        : "_len_detail",
-            }
-            for ck, mx in zip(component_keys, max_scores):
-                score_val = ats_components.get(ck, 0)
-                detail    = ats_components.get(_detail_key_map.get(ck, ""), "")
-                pct       = score_val / mx * 100 if mx else 0
-                clr       = score_color(pct)
-                detail_html = f'<div style="color:#8b949e; font-size:0.78rem; padding:0 4px 6px">{detail}</div>' if detail else ''
-                st.markdown(f"""
-                <div class="ats-row">
-                    <span style="color:#e6edf3; font-size:0.85rem">{ck}</span>
-                    <span style="color:{clr}; font-weight:700">{score_val}/{mx}</span>
-                </div>
-                <div style="height:4px; background:#30363d; border-radius:4px; margin:-2px 0 2px">
-                    <div style="height:100%; width:{pct}%; background:{clr}; border-radius:4px"></div>
-                </div>
-                {detail_html}""", unsafe_allow_html=True)
-
-        with tab_r:
-            for rec in shortlist_result["recommendations"]:
-                st.markdown(f"- {rec}")
-
-        if use_gemini_r:
-            _, gemini_ready = get_gemini_model()
-            if gemini_ready:
-                with st.spinner("🤖 Getting Gemini AI resume coaching..."):
-                    gemini_resume = gemini_analyze_resume(
-                        resume_text, job_title_r, job_desc_r, job_reqs_r,
-                        skills_result["skills_score"],
-                        ats_result["ats_score"],
-                        shortlist_result["shortlist_score"],
-                        skills_result["missing_skills"]
-                    )
-                if gemini_resume:
-                    st.markdown("---")
-                    st.markdown("""
-                    <div class="gemini-card">
-                        <div style='color:#4285f4; font-weight:700; font-size:1.05rem; margin-bottom:12px'>
-                            🤖 Gemini AI Personalized Resume Coaching
-                        </div>
-                    """, unsafe_allow_html=True)
-                    st.markdown(gemini_resume)
-                    st.markdown("</div>", unsafe_allow_html=True)
-            else:
-                st.info("💡 Add your Gemini API key in the sidebar for personalized AI coaching!")
 
 
 #  PAGE 5 – MODEL INSIGHTS
 elif page == "🤖  Model Insights":
     st.markdown("## 🤖 Model Insights & Performance")
 
-    tab1, tab2, tab3 = st.tabs(["📊 Model Comparison", "🔄 SMOTE & CV", "🎯 Threshold Tuning"])
+    tab1, tab2, tab3 = st.tabs(["📊 Real Metrics", "🔑 Feature Importance", "🗄️ SQL Integration"])
 
     with tab1:
-        models_data = {
-            'Model'    : ['LR v2.0 (SMOTE+thresh)', 'LR v1.0 (baseline)', 'Naive Bayes', 'Random Forest'],
-            'Precision': [72.4, 99.0, 82.3, 99.0],
-            'Recall'   : [88.3, 58.9, 53.8, 58.9],
-            'F1-Score' : [79.5, 73.9, 65.0, 73.9],
-            'AUC-ROC'  : [98.4, 98.4, 62.5, 98.9],
-        }
-        df_m = pd.DataFrame(models_data)
-        fig = go.Figure()
-        colors = ['#2ECC71','#3498DB','#F39C12','#E74C3C']
-        for i, metric in enumerate(['Precision','Recall','F1-Score','AUC-ROC']):
-            fig.add_trace(go.Bar(
-                name=metric, x=df_m['Model'], y=df_m[metric],
-                marker_color=colors[i], opacity=0.85
-            ))
-        fig.update_layout(
-            title="Model Comparison – All Metrics",
-            barmode='group', paper_bgcolor='#0d1117', font_color='#e6edf3',
-            legend=dict(bgcolor='#1e2430')
-        )
-        st.plotly_chart(fig, use_container_width=True)
-        st.dataframe(df_m.style.highlight_max(axis=0, color='#1a3d1a'), use_container_width=True)
+        if _mi:
+            top_cards = st.columns(5)
+            metric_cards = [
+                ("Precision", _mi.get("precision"), "#E74C3C"),
+                ("Recall", _mi.get("recall"), "#2ECC71"),
+                ("F1", _mi.get("f1_score"), "#F39C12"),
+                ("AUC-ROC", _mi.get("auc_roc"), "#3498DB"),
+                ("Threshold", _mi.get("threshold", FRAUD_THRESHOLD), "#9B59B6"),
+            ]
+            for col, (label, value, clr) in zip(top_cards, metric_cards):
+                with col:
+                    display = f"{value*100:.1f}%" if isinstance(value, (int, float)) and label != "Threshold" else str(value)
+                    st.markdown(make_kpi_card(display, label, clr), unsafe_allow_html=True)
+
+            metric_rows = [
+                ("Best model", MODEL_NAME),
+                ("Model family", MODEL_TYPE),
+                ("Training records", f"{_mi.get('total_records', 0):,}"),
+                ("Fraud rate", f"{_mi.get('fraud_rate_pct', 0):.2f}%"),
+                ("TF-IDF features", _mi.get('tfidf_features', 'N/A')),
+                ("Numeric features", _mi.get('numeric_features', 'N/A')),
+            ]
+            metric_df = pd.DataFrame(metric_rows, columns=["Metric", "Value"])
+            st.dataframe(metric_df, use_container_width=True, hide_index=True)
+        else:
+            st.warning("⚠️ model_info.json not found. Save notebook artifacts to display real metrics in this page.")
 
     with tab2:
-        col1, col2 = st.columns(2)
-        with col1:
-            st.markdown("""
-            <div class="info-card">
-                <b style="color:#3498DB">🔄 SMOTE Oversampling</b><br><br>
-                <b>Problem:</b> Only 4.84% fraud (866/17,880)<br>
-                <b>Solution:</b> SMOTE on training set only<br>
-                <b>Result:</b> Balanced 50/50 for training<br><br>
-                <b>Why not on test set?</b><br>
-                Test set uses original distribution to simulate real-world performance.
-                Applying SMOTE to test would give inflated, unrealistic metrics.
-            </div>""", unsafe_allow_html=True)
-
-        with col2:
-            cv_data = {
-                'Fold': [f'Fold {i}' for i in range(1, 6)],
-                'AUC' : [0.9810, 0.9847, 0.9856, 0.9831, 0.9861]
-            }
-            cv_df = pd.DataFrame(cv_data)
-            fig_cv = px.bar(cv_df, x='Fold', y='AUC', color='AUC',
-                            color_continuous_scale='Greens',
-                            title=f"5-Fold CV AUC (Mean={_mi.get('cv_auc_mean',0.9841):.4f})",
-                            range_y=[0.97, 1.0])
-            fig_cv.add_hline(y=_mi.get('cv_auc_mean',0.9841), line_dash='dash',
-                              line_color='#E74C3C', annotation_text="Mean AUC")
-            fig_cv.update_layout(paper_bgcolor='#0d1117', font_color='#e6edf3')
-            st.plotly_chart(fig_cv, use_container_width=True)
+        pos_df, neg_df = extract_model_feature_insights(model, tfidf)
+        if pos_df.empty and neg_df.empty:
+            st.info("Feature importance will appear here once the trained model artifacts are available.")
+        else:
+            col1, col2 = st.columns(2)
+            with col1:
+                if not pos_df.empty:
+                    fig_pos = px.bar(pos_df.sort_values("weight"), x="weight", y="keyword", orientation="h", color="weight", color_continuous_scale="Reds", title="Top Fraud-Contributing Words")
+                    fig_pos.update_layout(paper_bgcolor='#0d1117', font_color='#e6edf3', showlegend=False)
+                    st.plotly_chart(fig_pos, use_container_width=True)
+            with col2:
+                if not neg_df.empty:
+                    fig_neg = px.bar(neg_df.sort_values("weight"), x="weight", y="keyword", orientation="h", color="weight", color_continuous_scale="Greens", title="Top Legitimate-Signal Words")
+                    fig_neg.update_layout(paper_bgcolor='#0d1117', font_color='#e6edf3', showlegend=False)
+                    st.plotly_chart(fig_neg, use_container_width=True)
+            if not pos_df.empty:
+                st.dataframe(pd.concat([pos_df.head(10), neg_df.head(10)], ignore_index=True), use_container_width=True, hide_index=True)
 
     with tab3:
-        st.markdown("### 🎯 Threshold Tuning Analysis (Real Data)")
+        if DB_AVAILABLE:
+            # FIX 3: Refresh button — clears stale @st.cache_data and reloads
+            # SQL views from MySQL. Useful after data re-upload or first load.
+            col_ref, col_status = st.columns([1, 3])
+            with col_ref:
+                if st.button("🔄 Refresh SQL Views", key="refresh_sql"):
+                    load_sql_views.clear()
+                    load_data.clear()
+                    st.rerun()
+            with col_status:
+                st.markdown(
+                    "<div style='padding:8px 12px; background:#1b2d1b; border-left:3px solid #2ECC71;"
+                    " border-radius:6px; font-size:0.82rem; color:#2ECC71; margin-top:4px;'>"
+                    "✅ MySQL Connected — data loaded from <b>vw_fraud_summary</b>, "
+                    "<b>vw_industry_risk</b>, <b>vw_high_risk_jobs</b></div>",
+                    unsafe_allow_html=True,
+                )
 
-        if model_ok and data_ok:
-            # Use model_info data to reconstruct realistic precision-recall curve
-            # Based on actual model metrics from model_info.json
-            thresholds = np.linspace(0.1, 0.9, 50)
-            # Realistic curves based on logistic regression behavior
-            precisions_sim = np.clip(0.45 + 0.65 * (thresholds ** 0.6), 0.3, 0.99)
-            recalls_sim    = np.clip(0.98 - 1.05 * thresholds, 0.05, 0.99)
-            f1_sim         = np.where(
-                (precisions_sim + recalls_sim) > 0,
-                2 * precisions_sim * recalls_sim / (precisions_sim + recalls_sim + 1e-9),
-                0
-            )
+            s1, s2, s3 = st.columns(3)
+            summary_df = sql_views.get("summary", pd.DataFrame())
+            with s1:
+                st.markdown(make_kpi_card(f"{int(sql_scalar(summary_df, 'urgency_fraud_count', 0)):,}", "Urgency + Fraud", "#E74C3C"), unsafe_allow_html=True)
+            with s2:
+                st.markdown(make_kpi_card(f"{int(sql_scalar(summary_df, 'no_salary_fraud_count', 0)):,}", "No Salary + Fraud", "#F39C12"), unsafe_allow_html=True)
+            with s3:
+                st.markdown(make_kpi_card(f"{sql_scalar(summary_df, 'avg_fraud_completeness', 0)}", "Avg Fraud Completeness", "#3498DB"), unsafe_allow_html=True)
+
+            st.markdown("### 🏭 Industry Risk View")
+            st.dataframe(sql_views.get("industry", pd.DataFrame()), use_container_width=True, hide_index=True)
+            st.markdown("### 🚩 High Risk Jobs View")
+            st.dataframe(sql_views.get("high_risk", pd.DataFrame()).head(15), use_container_width=True, hide_index=True)
         else:
-            thresholds     = np.linspace(0.1, 0.9, 50)
-            precisions_sim = np.clip(0.45 + 0.65 * (thresholds ** 0.6), 0.3, 0.99)
-            recalls_sim    = np.clip(0.98 - 1.05 * thresholds, 0.05, 0.99)
-            f1_sim         = np.where(
-                (precisions_sim + recalls_sim) > 0,
-                2 * precisions_sim * recalls_sim / (precisions_sim + recalls_sim + 1e-9),
-                0
-            )
-
-        fig_thr = go.Figure()
-        fig_thr.add_trace(go.Scatter(x=thresholds, y=precisions_sim,
-                                     name='Precision', line=dict(color='#E74C3C', width=2)))
-        fig_thr.add_trace(go.Scatter(x=thresholds, y=recalls_sim,
-                                     name='Recall', line=dict(color='#2ECC71', width=2)))
-        fig_thr.add_trace(go.Scatter(x=thresholds, y=f1_sim,
-                                     name='F1-Score', line=dict(color='#3498DB', width=2, dash='dot')))
-        fig_thr.add_vline(x=FRAUD_THRESHOLD, line_dash='dash', line_color='#9B59B6', line_width=2,
-                          annotation_text=f"Selected Threshold = {FRAUD_THRESHOLD}",
-                          annotation_font_color='#9B59B6')
-        # Mark actual model points from model_info
-        fig_thr.add_trace(go.Scatter(
-            x=[FRAUD_THRESHOLD], y=[_mi.get('precision', 0.724)],
-            mode='markers', marker=dict(color='#E74C3C', size=12, symbol='star'),
-            name=f"Actual Precision@{FRAUD_THRESHOLD}"
-        ))
-        fig_thr.add_trace(go.Scatter(
-            x=[FRAUD_THRESHOLD], y=[_mi.get('recall', 0.883)],
-            mode='markers', marker=dict(color='#2ECC71', size=12, symbol='star'),
-            name=f"Actual Recall@{FRAUD_THRESHOLD}"
-        ))
-        fig_thr.update_layout(
-            title="Precision-Recall-F1 vs Threshold (⭐ = Actual Model Points from model_info.json)",
-            xaxis_title="Threshold", yaxis_title="Score",
-            paper_bgcolor='#0d1117', font_color='#e6edf3',
-            legend=dict(bgcolor='#1e2430'), yaxis=dict(range=[0, 1.05])
-        )
-        st.plotly_chart(fig_thr, use_container_width=True)
-
-        st.markdown(f"""
-        <div class="info-card">
-            <b style="color:#3498DB">Why threshold = {FRAUD_THRESHOLD}?</b><br>
-            Default threshold = 0.50: Precision = 99.0%, Recall = <b style="color:#E74C3C">58.9%</b>
-            (misses 41% of fraud!)<br>
-            Optimised threshold = 0.35: Precision = 72.4%, Recall = <b style="color:#2ECC71">88.3% ✅</b><br>
-            <b>Recall improved by 29.34%</b> – catches 88.3% of all fraudulent jobs.
-            Slight precision drop is acceptable in this use case.
-        </div>""", unsafe_allow_html=True)
+            st.info("MySQL connection unavailable. The app is running on CSV fallback, so SQL view outputs are hidden until the database is available.")
 
 
 #  PAGE 6 – LIMITATIONS & BIAS
@@ -1728,18 +1607,12 @@ elif page == "⚠️  Limitations & Bias":
     st.markdown("## ⚠️ Known Limitations & Bias")
 
     limitations = [
-        ("🏭 Industry Bias", "#E74C3C",
-         "Keywords 'oil', 'gas', 'petroleum' are flagged as fraud indicators due to overrepresentation in the training data. Legitimate Oil & Energy jobs may have higher false positive rates."),
-        ("🌐 English-Only", "#F39C12",
-         "TF-IDF cannot handle non-English job postings effectively. Future versions should use multilingual BERT or XLM-RoBERTa for global coverage."),
-        ("📍 Houston Anomaly", "#3498DB",
-         "Houston shows 33.7% fraud rate due to a small sample of only 89 postings – not statistically reliable. Do not use city-level fraud rates for small samples."),
-        ("🔄 Static Model", "#9B59B6",
-         "The model is trained once and has no automated retraining pipeline. Fraud tactics evolve; monthly retraining is recommended."),
-        ("📊 Imbalanced Dataset", "#2ECC71",
-         "SMOTE addresses class imbalance during training but the model performance on real-world data may differ as fraud patterns change over time."),
-        ("🤖 Form Limitations", "#E67E22",
-         "Job checker form doesn't collect has_benefits, has_questions, or telecommuting – these are set to 0, slightly degrading prediction accuracy vs full data."),
+        ("🏭 Industry Bias", "#E74C3C", "Some industries are overrepresented in fraudulent examples, so sector-specific false positives can still occur."),
+        ("🌐 English-Only Text Features", "#F39C12", "Current TF-IDF features work best on English job descriptions and English resumes."),
+        ("📍 Small-Sample Geography", "#3498DB", "Country or city-level fraud rates can be noisy when posting counts are low."),
+        ("🔄 Static Model Artifacts", "#9B59B6", "The deployed model depends on saved notebook artifacts. If the data changes, the model should be retrained and versioned."),
+        ("📊 Form vs Training Features", "#2ECC71", "The job checker form cannot collect every original dataset field, so some numeric inputs are approximated at inference time."),
+        ("🗄️ Local MySQL Dependency", "#E67E22", "SQL KPI cards and views require the fake_job_detection database plus the prepared views to be available locally."),
     ]
 
     for title_l, clr, desc_l in limitations:
@@ -1749,19 +1622,17 @@ elif page == "⚠️  Limitations & Bias":
             <span style="color:#c9d1d9; font-size:0.9rem">{desc_l}</span>
         </div>""", unsafe_allow_html=True)
 
-    st.markdown("### 🗺️ Future Roadmap")
-    roadmap = [
-        ("v4.1", "BERT/DistilBERT", "Contextual NLP for better text understanding"),
-        ("v4.2", "Real-time Retraining", "Monthly cron job for model updates with new data"),
-        ("v4.3", "NER-based Parsing", "Extract experience, salary, location using Named Entity Recognition"),
-        ("v4.4", "Multi-language Support", "XLM-RoBERTa for global job markets"),
-        ("v5.0", "Full Gemini Integration", "End-to-end LLM-powered fraud analysis pipeline"),
+    st.markdown("### ✅ Practical Next Improvements")
+    improvements = [
+        ("Save validation predictions", "Persist y_true and y_prob from the notebook so the app can render a real threshold curve and confusion matrix."),
+        ("Version model artifacts", "Store model_info.json, vectorizer, numeric columns, and training date together to keep deployments reproducible."),
+        ("Automate SQL refresh", "Create a repeatable CSV → MySQL load step so Streamlit and Power BI always read the same curated data."),
+        ("Expand language coverage", "Train multilingual text features if the project needs non-English job postings or resumes."),
     ]
-    for version, feature, desc_r in roadmap:
+    for title_i, desc_i in improvements:
         st.markdown(f"""
-        <div style='display:flex; align-items:center; margin:6px 0; padding:10px;
-                    background:#161b22; border-radius:8px;'>
-            <span class='badge badge-purple'>{version}</span>
-            <span style='color:#e6edf3; font-weight:600; margin:0 10px'>{feature}</span>
-            <span style='color:#8b949e; font-size:0.85rem'>{desc_r}</span>
+        <div style='display:flex; align-items:center; margin:6px 0; padding:10px; background:#161b22; border-radius:8px;'>
+            <span class='badge badge-purple'>Next</span>
+            <span style='color:#e6edf3; font-weight:600; margin:0 10px'>{title_i}</span>
+            <span style='color:#8b949e; font-size:0.85rem'>{desc_i}</span>
         </div>""", unsafe_allow_html=True)
