@@ -827,7 +827,7 @@ To request a feature:
 
 ### Project Links
 
-- **Repository**: [https://github.com/yourusername/fake-job-detection](https://github.com/yourusername/fake-job-detection)
+- **Repository**: [https://github.com/yourusername/fake-job-detection](https://github.com/Sumersingpatil2694/Fake-Job-Detection-And-Hiring-Market-Analysis)
 - **Issues**: [Report a Bug](https://github.com/yourusername/fake-job-detection/issues)
 - **Discussions**: [Join Discussion](https://github.com/yourusername/fake-job-detection/discussions)
 - **Wiki**: [Documentation](https://github.com/yourusername/fake-job-detection/wiki)
