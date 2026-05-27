@@ -659,7 +659,7 @@ Cached data loaders (5-minute TTL) for the dataset and SQL views.
 ![Job Checker](https://github.com/Sumersingpatil2694/Fake-Job-Detection-And-Hiring-Market-Analysis/blob/main/Screenshots/Job%20Checker.png)
 
 ### 🤖 Model Insights
-![Model Insights](screenshots/model_insights.png)
+![Model Insights](https://github.com/Sumersingpatil2694/Fake-Job-Detection-And-Hiring-Market-Analysis/blob/main/Screenshots/Model%20Insights.png)
 
 ### ⚠️ Limitations & Bias
 ![Limitations](screenshots/limitations.png)
