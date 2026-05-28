@@ -389,10 +389,10 @@ def load_models():
                 return p
         raise FileNotFoundError(fn)
     try:
-        with open(_find("best_model.pkl"),      "rb") as f: model = pickle.load(f)
-        with open(_find("tfidf_vectorizer.pkl"), "rb") as f: tfidf = pickle.load(f)
-        with open(_find("numeric_cols.pkl"),     "rb") as f: nc    = pickle.load(f)
-        with open(_find("model_info.json","model_info.json.txt"), "r") as f:
+        with open(_find("Models/best_model.pkl"),      "rb") as f: model = pickle.load(f)
+        with open(_find("Models/tfidf_vectorizer.pkl"), "rb") as f: tfidf = pickle.load(f)
+        with open(_find("Models/numeric_cols.pkl"),     "rb") as f: nc    = pickle.load(f)
+        with open(_find("Models/model_info.json","model_info.json.txt"), "r") as f:
             info = json.load(f)
         return model, tfidf, nc, info
     except FileNotFoundError:
