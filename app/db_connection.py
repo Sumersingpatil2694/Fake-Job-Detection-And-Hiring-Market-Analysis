@@ -2,33 +2,14 @@
 MySQL helper utilities for the Fake Job Detection project.
 
 Architecture:
-Notebook → Clean CSV → MySQL → SQL Queries / Views → Streamlit App
+    Notebook → Clean CSV → MySQL → SQL Queries / Views → Streamlit App
 
-FIXES applied (v5 — FINAL, fixes upload errors):
-  1. ensure_database_exists(): auto-creates `fake_job_detection` DB if missing.
-  2. ensure_schema(): auto-creates the `job_postings` table + all 6 views
-     if they don't exist yet. Solves the
-     "Table 'fake_job_detection.job_postings' doesn't exist" error.
-  3. upload_csv_to_mysql(): now calls ensure_schema() FIRST, so the
-     COUNT(*) / TRUNCATE / INSERT chain never sees a missing table again.
-  4. Safe "rows before clear" count — returns 0 if table is brand-new.
-  5. VARCHAR truncation, dedup, atomic clear+insert, FK-check toggle,
-     DELETE fallback.
-
-  ▶ NEW IN v5 (root-cause fixes for runtime errors):
-  6. **Drop CSV columns NOT in the MySQL schema** before upload — fixes the
-     "Unknown column 'combined_text' in field list" error.  The notebook
-     writes `combined_text` (used for TF-IDF) but the table has no such
-     column.  Any other unknown column is now silently dropped too.
-  7. **Add any missing schema columns** as defaults (e.g. has_department=0,
-     title_length=0) so the INSERT can never fail with
-     "Field 'xxx' doesn't have a default value".
-  8. **Lower chunksize to 200** and keep method='multi' — large 500-row
-     multi-INSERTs can hit `max_allowed_packet` on default MySQL installs.
-  9. **Fixed three f-strings missing placeholders** (cosmetic pyflakes
-     warnings, but cleaner logs).
- 10. **Hardened load_dotenv()** — re-reads .env even after Streamlit hot
-     reload by forcing override=False (only sets vars not already in env).
+Key responsibilities:
+    - Auto-create database, table, and views if missing (ensure_schema)
+    - Upload cleaned notebook CSV to MySQL (upload_csv_to_mysql)
+    - Drop CSV-only columns (e.g. combined_text) before insert
+    - Add missing schema columns with safe defaults before insert
+    - Provide fetch helpers for each analytics view used by the app
 """
 
 from __future__ import annotations
@@ -40,7 +21,7 @@ from urllib.parse import quote_plus
 import pandas as pd
 from dotenv import load_dotenv
 
-# override=False — keep already-exported shell env vars; fill rest from .env
+# Don't override shell env vars already set; fill remaining from .env
 load_dotenv(override=False)
 warnings.filterwarnings("ignore")
 
@@ -94,10 +75,8 @@ def get_mysql_config() -> dict[str, Any]:
     }
 
 
-# Lazy load — app can start even if .env is missing
-# FIX: ValueError now prints a clear warning instead of silently falling back.
-# Silent fallback caused MySQL to "fail" with localhost:root:"" credentials
-# and the app showed CSV mode with no explanation to the developer.
+# Try to load config at import time; print a warning if .env is missing
+# so the app still starts in CSV-only mode with a clear explanation.
 try:
     MYSQL_CONFIG = get_mysql_config()
 except ValueError as _cfg_err:
@@ -148,11 +127,11 @@ def get_engine():
             "MySQL drivers missing. Run:\n"
             "  pip install mysql-connector-python sqlalchemy"
         )
-    # auto-create database the first time
+    # Create database if this is the first run
     try:
         ensure_database_exists()
     except Exception as exc:
-        # Non-fatal — engine creation will surface a clearer error if needed
+        # Non-fatal; engine creation will raise a clearer error if needed
         print(f"[get_engine] ⚠ ensure_database_exists() failed: {exc}")
 
     cfg = get_mysql_config()
@@ -192,7 +171,7 @@ def test_connection() -> bool:
 
 
 # ---------------------------------------------------------------------------
-# SCHEMA AUTO-CREATION  (the real fix for "Table doesn't exist")
+# SCHEMA AUTO-CREATION
 # ---------------------------------------------------------------------------
 _CREATE_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS job_postings (
@@ -237,9 +216,8 @@ CREATE TABLE IF NOT EXISTS job_postings (
   COLLATE=utf8mb4_unicode_ci
 """
 
-# Indexes are listed individually so we can wrap each CREATE INDEX in a
-# try/except (MySQL has no "CREATE INDEX IF NOT EXISTS" before 8.0.29 on
-# all distros, so we just swallow the duplicate-key error).
+# Each index is wrapped in try/except because MySQL lacks
+# "CREATE INDEX IF NOT EXISTS" on older distributions.
 _CREATE_INDEX_STATEMENTS = [
     "CREATE INDEX idx_fraudulent           ON job_postings (fraudulent)",
     "CREATE INDEX idx_country              ON job_postings (country)",
@@ -480,9 +458,8 @@ def preview_table(limit: int = 5) -> pd.DataFrame:
 
 # ---------------------------------------------------------------------------
 # SCHEMA COLUMN WHITELIST — must match the CREATE TABLE above.
-# Any CSV column NOT in this list is dropped before INSERT to avoid the
-# "Unknown column 'combined_text' in field list" MySQL error.
-# `inserted_at` is excluded because MySQL fills it via DEFAULT CURRENT_TIMESTAMP.
+# Columns not in this list (e.g. combined_text) are dropped before INSERT.
+# `inserted_at` is excluded; MySQL fills it via DEFAULT CURRENT_TIMESTAMP.
 # ---------------------------------------------------------------------------
 SCHEMA_COLUMNS = [
     "job_id",
@@ -545,8 +522,8 @@ INT_COLS = [
 def _clean_dataframe_for_mysql(df: pd.DataFrame) -> pd.DataFrame:
     """
     Sanitise a DataFrame before upload:
-      1. ▶ NEW: Drop columns that are NOT in the MySQL schema (e.g. combined_text).
-      2. ▶ NEW: Add any missing numeric columns with safe defaults.
+      1. Drop columns not in the MySQL schema (e.g. combined_text).
+      2. Add any missing numeric columns with safe defaults.
       3. Cast bool columns to int.
       4. Cast int columns to int.
       5. Truncate all VARCHAR columns to their schema limits.
@@ -554,7 +531,7 @@ def _clean_dataframe_for_mysql(df: pd.DataFrame) -> pd.DataFrame:
     """
     df = df.copy()
 
-    # --- (1) Drop unknown columns (e.g. combined_text written by the notebook) ---
+    # 1. Drop columns not in schema
     unknown_cols = [c for c in df.columns if c not in SCHEMA_COLUMNS]
     if unknown_cols:
         df = df.drop(columns=unknown_cols)
@@ -563,7 +540,7 @@ def _clean_dataframe_for_mysql(df: pd.DataFrame) -> pd.DataFrame:
             f"column(s) not in MySQL schema: {unknown_cols}"
         )
 
-    # --- (2) Add missing numeric columns with safe defaults ---
+    # 2. Add missing numeric columns with safe defaults
     added_cols = []
     for col, default in SCHEMA_NUMERIC_DEFAULTS.items():
         if col not in df.columns:
@@ -575,17 +552,17 @@ def _clean_dataframe_for_mysql(df: pd.DataFrame) -> pd.DataFrame:
             f"missing column(s) with defaults: {added_cols}"
         )
 
-    # --- (3) Bool columns → int ---
+    # 3. Bool columns → int
     for col in BOOL_COLS:
         if col in df.columns:
             df[col] = df[col].fillna(0).astype(int)
 
-    # --- (4) Int columns ---
+    # 4. Int columns
     for col in INT_COLS:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0).astype(int)
 
-    # --- (5) VARCHAR truncation + NaN → "" ---
+    # 5. VARCHAR truncation + NaN → ""
     for col, max_len in VARCHAR_LIMITS.items():
         if col in df.columns:
             df[col] = df[col].fillna("").astype(str).str.slice(0, max_len)
@@ -604,23 +581,19 @@ def upload_csv_to_mysql(
     """
     Upload the cleaned notebook CSV into MySQL.
 
-    Safe workflow (v5):
-      0. ensure_schema()         — create table+views if missing
+    Steps:
+      0. ensure_schema()  — create table and views if missing
       1. Read CSV.
-      2. _clean_dataframe_for_mysql:
-           • DROP columns not in the schema (fixes 'combined_text' error)
-           • ADD missing numeric columns with defaults
-           • Cast dtypes
-           • Truncate VARCHARs
-      3. Drop duplicates on job_id BEFORE uploading.
-      4. Clear the table (TRUNCATE with FK-checks disabled; DELETE fallback).
-      5. Insert rows in chunks using SQLAlchemy.
-      6. Verify row count.
+      2. Sanitise: drop unknown columns, add missing defaults, cast dtypes, truncate VARCHARs.
+      3. Deduplicate on job_id.
+      4. Clear the table (TRUNCATE; falls back to DELETE on failure).
+      5. Insert rows in chunks via SQLAlchemy.
+      6. Verify final row count.
     """
-    # --- 0. Make sure database + table + views exist ---
+    # 0. Ensure database, table, and views exist
     ensure_schema(verbose=True)
 
-    # --- 1. Load CSV ---
+    # 1. Load CSV
     if not os.path.exists(csv_path):
         raise FileNotFoundError(
             f"CSV not found at '{csv_path}'.\n"
@@ -630,7 +603,7 @@ def upload_csv_to_mysql(
     df = pd.read_csv(csv_path, low_memory=False)
     print(f"[upload_csv] CSV loaded: {len(df):,} rows × {df.shape[1]} columns")
 
-    # --- 2. Clean / sanitise dtypes, drop unknown cols, truncate VARCHARs ---
+    # 2. Clean and sanitise dtypes, drop unknown columns, truncate VARCHARs
     df = _clean_dataframe_for_mysql(df)
     print(
         f"[upload_csv] ✅ Data sanitised — final shape: "
@@ -638,7 +611,7 @@ def upload_csv_to_mysql(
         f"(only schema columns kept)."
     )
 
-    # --- 3. Deduplicate on job_id ---
+    # 3. Deduplicate on job_id
     if "job_id" in df.columns:
         before = len(df)
         df = df.drop_duplicates(subset=["job_id"])
@@ -647,7 +620,7 @@ def upload_csv_to_mysql(
             print(f"[upload_csv] ⚠ Dropped {removed:,} duplicate job_ids from CSV before upload.")
 
     safe_name = table_name.replace("`", "").strip()
-    # FIX: SQL injection guard — whitelist allowed table names
+    # Whitelist allowed table names to prevent SQL injection
     ALLOWED_TABLES = {"job_postings"}
     if safe_name not in ALLOWED_TABLES:
         raise ValueError(
@@ -655,9 +628,9 @@ def upload_csv_to_mysql(
         )
     engine = get_engine()
 
-    # --- 4. Clear table (TRUNCATE with fallback to DELETE) ---
+    # 4. Clear table before insert (TRUNCATE with DELETE fallback)
     with engine.begin() as conn:
-        # Safe count — returns 0 if table is brand-new
+        # Count rows before clearing; returns 0 if table is empty or new
         try:
             count_before = conn.execute(
                 text(f"SELECT COUNT(*) FROM `{safe_name}`")
@@ -690,8 +663,7 @@ def upload_csv_to_mysql(
         if not cleared:
             raise RuntimeError("[upload_csv] Table was not cleared — aborting to prevent duplicates.")
 
-    # --- 5. Insert rows ---
-    # chunksize=200 + method="multi" is safe for default MySQL max_allowed_packet
+    # 5. Insert rows in small chunks to stay within MySQL max_allowed_packet
     df.to_sql(
         name=safe_name,
         con=engine,
@@ -701,7 +673,7 @@ def upload_csv_to_mysql(
         method="multi",
     )
 
-    # --- 6. Verify row count ---
+    # 6. Verify final row count
     with engine.connect() as conn:
         count_after = conn.execute(
             text(f"SELECT COUNT(*) FROM `{safe_name}`")
