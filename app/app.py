@@ -13,6 +13,7 @@ import plotly.graph_objects as go
 from scipy.sparse import hstack, csr_matrix
 # TfidfVectorizer is loaded at runtime from the pickled file (see load_models)
 
+
 # ── Optional: DB / SQL integration ───────────────────────────────────────────
 try:
     from db_connection import (
@@ -229,13 +230,15 @@ def risk_label(prob: float) -> str:
 
 # DATA & MODEL LOADERS
 # SQL-first with CSV fallback; 5 min cache matches load_sql_views
+# Google Drive CSV URL — fallback when MySQL unavailable
+DRIVE_URL = "https://docs.google.com/spreadsheets/d/15jG36F9jsPTjsRXVSas9TA8FxZkMtJX7RZ3sEXMbT8E/export?format=csv"
+
 @st.cache_data(show_spinner=False, ttl=300)
 def load_data():
+    # 1️⃣ MySQL — Primary source
     if DB_MODULE_AVAILABLE and test_connection():
-        # Load full table without a row limit
         df = run_query("SELECT * FROM job_postings")
         if df is not None and not df.empty:
-            # Remove duplicate rows in case CSV was uploaded more than once
             if "job_id" in df.columns:
                 before = len(df)
                 df = df.drop_duplicates(subset=["job_id"])
@@ -244,6 +247,16 @@ def load_data():
                     print(f"[load_data] ⚠ Removed {removed:,} duplicate rows from MySQL.")
             return df, "MySQL"
 
+    # 2️⃣ Google Drive — Secondary fallback
+    try:
+        with st.spinner("📡 Loading dataset from Google Drive..."):
+            df = pd.read_csv(DRIVE_URL)
+        if df is not None and not df.empty:
+            return df, "Google Drive"
+    except Exception:
+        pass
+
+    # 3️⃣ Local CSV — Last resort
     paths = [
         "outputs/cleaned_job_postings.csv",
         "cleaned_job_postings.csv",
