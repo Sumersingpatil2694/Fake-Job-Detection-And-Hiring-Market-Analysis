@@ -13,7 +13,6 @@ import plotly.graph_objects as go
 from scipy.sparse import hstack, csr_matrix
 # TfidfVectorizer is loaded at runtime from the pickled file (see load_models)
 
-
 # ── Optional: DB / SQL integration ───────────────────────────────────────────
 try:
     from db_connection import (
