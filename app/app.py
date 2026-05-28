@@ -11,9 +11,7 @@ import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
 from scipy.sparse import hstack, csr_matrix
-# NOTE: TfidfVectorizer import removed — it was unused (we load a pickled
-# vectorizer at runtime via load_models()).  Removing it avoids the
-# pyflakes 'imported but unused' warning and shaves ~200 ms off cold-start.
+# TfidfVectorizer is loaded at runtime from the pickled file (see load_models)
 
 
 # ── Optional: DB / SQL integration ───────────────────────────────────────────
@@ -116,9 +114,9 @@ URGENCY_WORDS = [
     'bonus', '100%', 'free training', 'daily pay'
 ]
 
-# FIX: RED_FLAG_CHECKS now stores (check_fn, positive_label) tuples.
-# Previously the positive label was computed via brittle chained .replace() calls —
-# any key name change would silently break the UI. Now each entry owns its label.
+# Each entry is a (check_fn, positive_label) tuple.
+# check_fn returns True when the flag is a red flag.
+# positive_label is shown when the check passes (no red flag).
 RED_FLAG_CHECKS = {
     "No salary disclosed"           : (lambda r: r.get("has_salary", 1) == 0,            "Salary disclosed"),
     "No company profile provided"   : (lambda r: r.get("has_company_profile", 1) == 0,   "Company profile available"),
@@ -129,10 +127,7 @@ RED_FLAG_CHECKS = {
 }
 
 
-# SQL + MODEL HELPERS
-# FIX: ttl=300 — both load_data() and load_sql_views() use same TTL for consistent refresh.
-# Previously no TTL meant empty results were cached forever if MySQL
-# wasn't ready on first load, causing SQL tab to always show zeros/empty.
+# Cache for 5 min; consistent TTL with load_data() prevents stale empty results
 @st.cache_data(show_spinner=False, ttl=300)
 def load_sql_views():
     if not DB_MODULE_AVAILABLE or not test_connection():
@@ -234,16 +229,14 @@ def risk_label(prob: float) -> str:
     return "✅ LOW RISK – LIKELY LEGITIMATE"
 
 # DATA & MODEL LOADERS
-# DATA LOADER (SQL-first with CSV fallback)
-@st.cache_data(show_spinner=False, ttl=300)  # FIX: TTL=300 — matches load_sql_views for consistent cache refresh
+# SQL-first with CSV fallback; 5 min cache matches load_sql_views
+@st.cache_data(show_spinner=False, ttl=300)
 def load_data():
     if DB_MODULE_AVAILABLE and test_connection():
-        # FIX 2a: Removed LIMIT 20000 — it was truncating data when MySQL
-        # had exactly 17,880 rows but showing 20,000 due to cached stale data.
+        # Load full table without a row limit
         df = run_query("SELECT * FROM job_postings")
         if df is not None and not df.empty:
-            # FIX 2b: Dedup on job_id — safety net against accidental duplicate
-            # uploads (e.g. upload_csv_to_mysql run multiple times).
+            # Remove duplicate rows in case CSV was uploaded more than once
             if "job_id" in df.columns:
                 before = len(df)
                 df = df.drop_duplicates(subset=["job_id"])
@@ -297,15 +290,14 @@ def prepare_dataset(df: pd.DataFrame | None) -> pd.DataFrame | None:
     if 'req_length' not in df.columns:
         df['req_length'] = df.get('requirements', pd.Series(dtype=str)).fillna('').astype(str).str.len()
     if 'profile_completeness' not in df.columns:
-        # FIX: max=6 — must match notebook Cell 3 formula exactly.
-        # has_questions included so scoring is consistent with training data.
+        # Score 0-6, must match the training data formula exactly
         df['profile_completeness'] = (
             df['has_salary'].fillna(0).astype(int)
             + df['has_company_profile'].fillna(0).astype(int)
             + df['has_requirements'].fillna(0).astype(int)
             + df['has_benefits'].fillna(0).astype(int)
             + df['has_company_logo'].fillna(0).astype(int)
-            + df['has_questions'].fillna(0).astype(int)  # FIX: was missing, max was 5 not 6
+            + df['has_questions'].fillna(0).astype(int)
         )
 
     # Always re-derive country from location (dataset's country col may contain city names)
@@ -413,10 +405,9 @@ def predict_job(title, company, desc, reqs, has_sal, has_logo, model, tfidf, num
     req_len = len(str(reqs))
     title_len = len(str(title))
 
-    # FIX: max=6 — notebook Cell 3 counts 6 features including has_benefits and has_questions.
-    # Form doesn't collect them, so default 0 — but formula must match training exactly.
-    has_benefits_val  = 0  # not collected in form — default 0
-    has_questions_val = 0  # not collected in form — default 0
+    # Score 0-6, matching the training data formula; form fields not collected default to 0
+    has_benefits_val  = 0
+    has_questions_val = 0
     profile_completeness_score = (
         int(has_sal) + has_company + has_reqs
         + has_benefits_val + int(has_logo) + has_questions_val
@@ -438,9 +429,7 @@ def predict_job(title, company, desc, reqs, has_sal, has_logo, model, tfidf, num
         'has_department': 0,
     }
 
-    # The model was trained on exactly these 10 numeric features (notebook Cell 28).
-    # We pull from numeric_cols.pkl when available but ENFORCE a 10-feature shape
-    # so the model never receives 11 features (which would crash predict_proba).
+    # 10 numeric features used during training; order must match model input shape
     EXPECTED_NUMERIC_COLS = [
         'has_salary',
         'has_company_profile',
@@ -457,19 +446,15 @@ def predict_job(title, company, desc, reqs, has_sal, has_logo, model, tfidf, num
     if num_cols is not None and len(list(num_cols)) == len(EXPECTED_NUMERIC_COLS):
         ordered_numeric_cols = list(num_cols)
     else:
-        # Safety fallback — if the saved pkl drifted, fall back to the canonical
-        # 10 features used during training instead of crashing.
+        # Fall back to default list if saved pkl has drifted from training
         ordered_numeric_cols = EXPECTED_NUMERIC_COLS
 
-    # Build a feature vector with EXACTLY the trained number of features.
-    # Do NOT append req_length / title_length / has_department here — the model
-    # was not trained on them and adding them causes a ValueError at inference.
+    # Build feature vector with exactly the columns the model was trained on
     num_feats = np.array([[
         feature_values.get(col, 0) for col in ordered_numeric_cols
     ]], dtype=float)
 
-    # FIX: bare assert replaced — raises ValueError instead of AssertionError
-    # so callers can catch it cleanly and show a user-friendly Streamlit error.
+    # Validate feature count before calling predict_proba
     EXPECTED = len(ordered_numeric_cols)
     if num_feats.shape[1] != EXPECTED:
         raise ValueError(
@@ -490,7 +475,7 @@ def predict_job(title, company, desc, reqs, has_sal, has_logo, model, tfidf, num
         'desc_length': desc_len,
         'has_company_logo': int(has_logo),
     }
-    # FIX: unpack (check_fn, positive_label) tuple — only call the check fn here
+    # Apply each check function; ignore the positive_label half of the tuple here
     red_flags = {k: check_fn(flags) for k, (check_fn, _pos_label) in RED_FLAG_CHECKS.items()}
 
     top_words = []
@@ -537,7 +522,6 @@ if data_ok:
         _mi.setdefault("fraud_rate_pct", round(float(df['fraudulent'].mean() * 100), 2))
 
 MODEL_NAME = _mi.get("best_model", "Logistic Regression" if model_ok else "Model artifacts not found")
-# FIX: use actual class name — works for LR, RF, GBM, XGB, etc.
 MODEL_TYPE = type(model).__name__ if model is not None else "Unknown"
 
 
@@ -560,7 +544,7 @@ with st.sidebar:
         "⚠️  Limitations & Bias",
     ], label_visibility="collapsed")
 
-    # FIX: Reload button — clears stale cache after notebook re-run
+    # Clear cache so fresh data is loaded after notebook re-run
     if st.button("🔄 Reload Data", help="Clear cache and reload from MySQL / CSV"):
         load_data.clear()
         load_sql_views.clear()
@@ -1228,7 +1212,7 @@ elif page == "📊  EDA Dashboard":
             </div>""", unsafe_allow_html=True)
 
 
-#  PAGE 3 – JOB CHECKER  (v5.0)
+#  PAGE 3 – JOB CHECKER
 elif page == "🔍  Job Checker":
 
     st.markdown("""
@@ -1390,7 +1374,7 @@ elif page == "🔍  Job Checker":
                 with st.spinner("🔍 Analyzing job posting with ML model..."):
                     prob, red_flags, top_words = predict_job(title, company, desc, reqs, has_sal, has_logo, model, tfidf, num_cols)
             except ValueError as _feat_err:
-                # FIX: catches the feature-mismatch ValueError from predict_job()
+                # Handles feature count mismatch between app and saved model
                 st.error(f"❌ Model feature mismatch: {_feat_err}")
                 st.stop()
 
@@ -1568,8 +1552,7 @@ elif page == "🤖  Model Insights":
 
     with tab3:
         if DB_AVAILABLE:
-            # FIX 3: Refresh button — clears stale @st.cache_data and reloads
-            # SQL views from MySQL. Useful after data re-upload or first load.
+            # Clear cached SQL views and reload from MySQL
             col_ref, col_status = st.columns([1, 3])
             with col_ref:
                 if st.button("🔄 Refresh SQL Views", key="refresh_sql"):
