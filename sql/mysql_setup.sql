@@ -4,11 +4,10 @@
 --
 -- Run order: mysql_setup.sql → 01_fake_job_schema.sql → upload CSV via notebook
 --
--- Note (v4): The notebook now AUTO-creates the database AND the table
---            via db_connection.ensure_schema().  Running this file
---            manually is therefore optional — it's only here for users
---            who prefer to provision the database from MySQL Workbench
---            or the mysql CLI.
+-- Note: The notebook auto-creates the database and table via
+-- db_connection.ensure_schema(). Running this file manually is optional —
+-- it is provided for users who prefer to provision the database from
+-- MySQL Workbench or the mysql CLI.
 -- =============================================================================
 
 CREATE DATABASE IF NOT EXISTS fake_job_detection
