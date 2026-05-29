@@ -936,7 +936,7 @@ A: Try these:
 
 ### ⭐ If you found this project helpful, please give it a star! ⭐
 
-**Made with ❤️, Python, SQL & a lot of caffeine**
+**Made with Python, SQL & a lot of caffeine**
 
 [⬆ Back to Top](#️-fake-job-detection--hiring-market-analysis)
 
