@@ -14,7 +14,7 @@ from scipy.sparse import hstack, csr_matrix
 # TfidfVectorizer is loaded at runtime from the pickled file (see load_models)
 
 
-# ── Optional: DB / SQL integration ──────
+# ── Optional: DB / SQL integration ───────────────────────────────────────────
 try:
     from db_connection import (
         MYSQL_CONFIG,
@@ -389,10 +389,10 @@ def load_models():
                 return p
         raise FileNotFoundError(fn)
     try:
-        with open(_find("Models/best_model.pkl"),      "rb") as f: model = pickle.load(f)
-        with open(_find("Models/tfidf_vectorizer.pkl"), "rb") as f: tfidf = pickle.load(f)
-        with open(_find("Models/numeric_cols.pkl"),     "rb") as f: nc    = pickle.load(f)
-        with open(_find("Models/model_info.json","model_info.json.txt"), "r") as f:
+        with open(_find("best_model.pkl"),      "rb") as f: model = pickle.load(f)
+        with open(_find("tfidf_vectorizer.pkl"), "rb") as f: tfidf = pickle.load(f)
+        with open(_find("numeric_cols.pkl"),     "rb") as f: nc    = pickle.load(f)
+        with open(_find("model_info.json","model_info.json.txt"), "r") as f:
             info = json.load(f)
         return model, tfidf, nc, info
     except FileNotFoundError:
@@ -1304,25 +1304,53 @@ elif page == "🔍  Job Checker":
             has_logo = st.checkbox("🏢 Company Logo", value=False,
                                   help="Check this only if the job posting shows a verified company logo.")
 
-        filled_title = bool(str(title).strip())
-        filled_company = bool(str(company).strip())
-        filled_desc = bool(str(desc).strip())
-        filled_reqs = bool(str(reqs).strip())
-        completeness_score = (int(filled_title) + int(filled_company) + int(filled_desc) + int(filled_reqs) + int(has_sal) + int(has_logo))
+        # Quality-aware completeness — requires minimum meaningful content
+        MIN_TITLE_LEN_LIVE = 5
+        MIN_DESC_LEN_LIVE  = 100
+        title_ok   = len(str(title).strip()) >= MIN_TITLE_LEN_LIVE
+        company_ok = bool(str(company).strip())
+        desc_ok    = len(str(desc).strip()) >= MIN_DESC_LEN_LIVE
+        reqs_ok    = len(str(reqs).strip()) >= 20
+        filled_title   = title_ok
+        filled_company = company_ok
+        filled_desc    = desc_ok
+        filled_reqs    = reqs_ok
+
+        completeness_score = (int(title_ok) + int(company_ok) + int(desc_ok) + int(reqs_ok) + int(has_sal) + int(has_logo))
         completeness_pct = int(completeness_score / 6 * 100)
 
-        if completeness_pct >= 80:
-            bar_color = "#2ECC71"; bar_label = "Excellent"
-        elif completeness_pct >= 50:
-            bar_color = "#F39C12"; bar_label = "Good"
-        else:
-            bar_color = "#E74C3C"; bar_label = "Incomplete"
+        # Only show Ready-to-analyze if both required fields pass quality bar
+        ready_to_analyze = title_ok and desc_ok
 
+        if ready_to_analyze and completeness_pct >= 80:
+            bar_color = "#2ECC71"; bar_label = "Ready to Analyze ✓"
+        elif ready_to_analyze and completeness_pct >= 50:
+            bar_color = "#F39C12"; bar_label = "Partially Complete"
+        elif title_ok or desc_ok:
+            bar_color = "#F39C12"; bar_label = "Needs More Detail"
+        else:
+            bar_color = "#E74C3C"; bar_label = "Required Fields Missing"
+
+        # Chip label mapping with quality hints
+        chip_items = [
+            ("Title",        title_ok,   f"≥{MIN_TITLE_LEN_LIVE} chars",  len(str(title).strip())),
+            ("Company",      company_ok, "any text",                       len(str(company).strip())),
+            ("Description",  desc_ok,    f"≥{MIN_DESC_LEN_LIVE} chars",   len(str(desc).strip())),
+            ("Requirements", reqs_ok,    "≥20 chars",                      len(str(reqs).strip())),
+            ("Salary",       has_sal,    "checkbox",                       None),
+            ("Logo",         has_logo,   "checkbox",                       None),
+        ]
         chips_html = ""
-        for name, ok in [("Title", filled_title), ("Company", filled_company), ("Description", filled_desc), ("Requirements", filled_reqs), ("Salary", has_sal), ("Logo", has_logo)]:
-            cls = "badge badge-green" if ok else "badge badge-blue"
-            ic = "✔" if ok else "○"
-            chips_html += f'<span class="{cls}" style="margin:2px">{ic} {name}</span>'
+        for name, ok, hint, length in chip_items:
+            if ok:
+                cls = "badge badge-green"
+                ic = "✔"
+                chips_html += f'<span class="{cls}" style="margin:2px" title="{hint}">{ic} {name}</span>'
+            else:
+                cls = "badge badge-red"
+                ic = "✗"
+                detail = f" ({length}/{hint.split('≥')[1] if '≥' in hint else '?'})" if length is not None else ""
+                chips_html += f'<span class="{cls}" style="margin:2px;opacity:0.8" title="Needs: {hint}">{ic} {name}{detail}</span>'
 
         st.markdown(f"""
         <div style="background:#161b22; border:1px solid #21262d; border-radius:10px; padding:12px 14px; margin:10px 0;">
@@ -1334,6 +1362,7 @@ elif page == "🔍  Job Checker":
                 <div style="width:{completeness_pct}%; background:{bar_color}; height:100%; border-radius:8px; transition:width 0.4s ease;"></div>
             </div>
             <div style="margin-top:8px; display:flex; flex-wrap:wrap; gap:4px;">{chips_html}</div>
+            {"" if ready_to_analyze else '<div style="margin-top:8px; font-size:0.76rem; color:#E74C3C;">⚠ Provide a Job Title (≥5 chars) and Description (≥100 chars) to enable analysis.</div>'}
         </div>
         """, unsafe_allow_html=True)
 
@@ -1412,6 +1441,50 @@ elif page == "🔍  Job Checker":
                 <div style="color:#8b949e; font-size:0.78rem; margin-bottom:8px;">Fraud Probability</div>
                 <div style="font-size:1.1rem; font-weight:800; color:{clr}; letter-spacing:0.02em;">{verdict_emoji} {lbl}</div>
                 <div style="font-size:0.82rem; color:#c9d1d9; margin-top:4px;">Threshold: {FRAUD_THRESHOLD*100:.0f}% &nbsp;|&nbsp; Red Flags: {len(active_flags)}/6</div>
+            </div>
+            """, unsafe_allow_html=True)
+
+            # ── Model reasoning explanation ──────────────────────────────────
+            flag_count = len(active_flags)
+            if is_fraud:
+                reason_color = "#E74C3C"
+                reason_icon = "🚨"
+                if flag_count >= 3:
+                    reason_text = (
+                        f"The ML model assigned <b>{prob*100:.1f}% fraud probability</b> — above the {FRAUD_THRESHOLD*100:.0f}% threshold. "
+                        f"<b>{flag_count} of 6 red flags triggered</b>, including: {', '.join(active_flags[:2])}. "
+                        "TF-IDF analysis also found high-weight fraud-associated keywords in the text."
+                    )
+                else:
+                    reason_text = (
+                        f"The ML model scored this at <b>{prob*100:.1f}%</b> — above the {FRAUD_THRESHOLD*100:.0f}% decision threshold. "
+                        f"Even with only {flag_count} structural red flag(s), the <b>TF-IDF text features</b> contributed strongly. "
+                        "Fraudulent postings often use specific language patterns the model learned from 17,880 training examples."
+                    )
+            elif prob >= 0.20:
+                reason_color = "#F39C12"
+                reason_icon = "⚠️"
+                reason_text = (
+                    f"Medium risk: fraud probability is <b>{prob*100:.1f}%</b> — below the {FRAUD_THRESHOLD*100:.0f}% threshold but above 20%. "
+                    f"{flag_count} structural red flag(s) detected. "
+                    "Proceed cautiously — verify the company independently before applying."
+                )
+            else:
+                reason_color = "#2ECC71"
+                reason_icon = "✅"
+                reason_text = (
+                    f"Low risk: the model assigned only <b>{prob*100:.1f}% fraud probability</b>. "
+                    f"Only {flag_count} of 6 structural red flags triggered. "
+                    "The job description language aligns with patterns the model learned from <b>legitimate postings</b> — "
+                    "it lacks urgency phrases, has sufficient detail, and structural signals look healthy."
+                )
+            st.markdown(f"""
+            <div style="background:#161b22; border:1px solid #30363d; border-left:4px solid {reason_color};
+                        border-radius:10px; padding:14px 16px; margin:8px 0; font-size:0.83rem; color:#c9d1d9; line-height:1.6;">
+                <div style="color:{reason_color}; font-weight:700; font-size:0.85rem; margin-bottom:6px;">
+                    {reason_icon} Why this result?
+                </div>
+                {reason_text}
             </div>
             """, unsafe_allow_html=True)
 
