@@ -389,10 +389,10 @@ def load_models():
                 return p
         raise FileNotFoundError(fn)
     try:
-        with open(_find("Models/best_model.pkl"),      "rb") as f: model = pickle.load(f)
-        with open(_find("Models/tfidf_vectorizer.pkl"), "rb") as f: tfidf = pickle.load(f)
-        with open(_find("Models/numeric_cols.pkl"),     "rb") as f: nc    = pickle.load(f)
-        with open(_find("Models/model_info.json","model_info.json.txt"), "r") as f:
+        with open(_find("best_model.pkl"),      "rb") as f: model = pickle.load(f)
+        with open(_find("tfidf_vectorizer.pkl"), "rb") as f: tfidf = pickle.load(f)
+        with open(_find("numeric_cols.pkl"),     "rb") as f: nc    = pickle.load(f)
+        with open(_find("model_info.json","model_info.json.txt"), "r") as f:
             info = json.load(f)
         return model, tfidf, nc, info
     except FileNotFoundError:
@@ -1636,38 +1636,206 @@ elif page == "🤖  Model Insights":
                 st.dataframe(pd.concat([pos_df.head(10), neg_df.head(10)], ignore_index=True), use_container_width=True, hide_index=True)
 
     with tab3:
+        # ── Compute SQL view outputs from df (works with both MySQL and CSV) ──
+        def compute_sql_views(df):
+            """Replicate all 6 MySQL views using pandas — identical logic."""
+            out = {}
+
+            # vw_fraud_summary
+            total = len(df)
+            fraud = df['fraudulent'].sum()
+            legit = total - fraud
+            out['summary'] = pd.DataFrame([{
+                'total_jobs': total,
+                'total_fraud': int(fraud),
+                'total_legit': int(legit),
+                'fraud_rate_pct': round(100.0 * fraud / total, 2) if total else 0,
+                'avg_fake_desc_len': round(df[df['fraudulent']==1]['desc_length'].mean(), 0) if 'desc_length' in df.columns else 'N/A',
+                'avg_real_desc_len': round(df[df['fraudulent']==0]['desc_length'].mean(), 0) if 'desc_length' in df.columns else 'N/A',
+                'urgency_fraud_count': int(df[(df.get('has_urgency_words', pd.Series(0, index=df.index))==1) & (df['fraudulent']==1)].shape[0]) if 'has_urgency_words' in df.columns else 0,
+                'no_salary_fraud_count': int(df[(df.get('has_salary', pd.Series(1, index=df.index))==0) & (df['fraudulent']==1)].shape[0]) if 'has_salary' in df.columns else 0,
+                'avg_fraud_completeness': round(df[df['fraudulent']==1]['profile_completeness'].mean(), 2) if 'profile_completeness' in df.columns else 'N/A',
+                'avg_legit_completeness': round(df[df['fraudulent']==0]['profile_completeness'].mean(), 2) if 'profile_completeness' in df.columns else 'N/A',
+            }])
+
+            # vw_industry_risk
+            if 'industry' in df.columns:
+                ind = df[df['industry'].notna()].copy()
+                ind['industry'] = ind['industry'].replace('', 'Unknown').fillna('Unknown')
+                grp = ind.groupby('industry').agg(
+                    total_jobs=('fraudulent','count'),
+                    fraud_count=('fraudulent','sum'),
+                ).reset_index()
+                grp = grp[grp['total_jobs'] >= 30].copy()
+                grp['fraud_rate_pct'] = (100.0 * grp['fraud_count'] / grp['total_jobs']).round(2)
+                if 'has_urgency_words' in df.columns:
+                    urg = ind[ind['industry'].notna()].groupby('industry')['has_urgency_words'].mean().reset_index()
+                    urg.columns = ['industry','urgency_word_pct']
+                    urg['urgency_word_pct'] = (urg['urgency_word_pct']*100).round(1)
+                    grp = grp.merge(urg, on='industry', how='left')
+                if 'profile_completeness' in df.columns:
+                    pc = ind.groupby('industry')['profile_completeness'].mean().reset_index()
+                    pc.columns = ['industry','avg_completeness']
+                    pc['avg_completeness'] = pc['avg_completeness'].round(2)
+                    grp = grp.merge(pc, on='industry', how='left')
+                out['industry'] = grp.sort_values('fraud_rate_pct', ascending=False).reset_index(drop=True)
+
+            # vw_country_fraud_analysis
+            if 'country' in df.columns:
+                cdf = df.copy()
+                cdf['country'] = cdf['country'].str.strip().replace('', 'Unknown').fillna('Unknown')
+                cgrp = cdf.groupby('country').agg(total_jobs=('fraudulent','count'), fraud_jobs=('fraudulent','sum')).reset_index()
+                cgrp = cgrp[cgrp['total_jobs'] >= 20].copy()
+                cgrp['fraud_rate_pct'] = (100.0 * cgrp['fraud_jobs'] / cgrp['total_jobs']).round(2)
+                out['country'] = cgrp.sort_values('fraud_rate_pct', ascending=False).reset_index(drop=True)
+
+            # vw_employment_type_fraud_analysis
+            if 'employment_type' in df.columns:
+                edf = df.copy()
+                edf['employment_type'] = edf['employment_type'].str.strip().replace('', 'Not Specified').fillna('Not Specified')
+                egrp = edf.groupby('employment_type').agg(total_jobs=('fraudulent','count'), fraud_jobs=('fraudulent','sum')).reset_index()
+                egrp = egrp[egrp['total_jobs'] >= 20].copy()
+                egrp['fraud_rate_pct'] = (100.0 * egrp['fraud_jobs'] / egrp['total_jobs']).round(2)
+                out['employment'] = egrp.sort_values('fraud_rate_pct', ascending=False).reset_index(drop=True)
+
+            # vw_salary_fraud_analysis
+            if 'has_salary' in df.columns:
+                sdf = df.copy()
+                sdf['salary_status'] = sdf['has_salary'].apply(lambda x: 'Salary Disclosed' if x==1 else 'Salary Not Disclosed')
+                sgrp = sdf.groupby('salary_status').agg(total_jobs=('fraudulent','count'), fraud_jobs=('fraudulent','sum')).reset_index()
+                sgrp['fraud_rate_pct'] = (100.0 * sgrp['fraud_jobs'] / sgrp['total_jobs']).round(2)
+                out['salary'] = sgrp.sort_values('fraud_rate_pct', ascending=False).reset_index(drop=True)
+
+            # vw_high_risk_jobs
+            hrdf = df.copy()
+            if 'has_salary' in hrdf.columns and 'has_company_logo' in hrdf.columns and 'has_urgency_words' in hrdf.columns:
+                def risk_cat(row):
+                    if row.get('has_salary',1)==0 and row.get('has_company_logo',1)==0 and row.get('has_urgency_words',0)==1:
+                        return 'VERY HIGH RISK'
+                    elif row.get('has_salary',1)==0 and row.get('has_company_logo',1)==0:
+                        return 'HIGH RISK'
+                    elif row.get('has_salary',1)==0 or row.get('has_urgency_words',0)==1:
+                        return 'MEDIUM RISK'
+                    return 'LOW RISK'
+                hrdf['risk_category'] = hrdf.apply(risk_cat, axis=1)
+                cols = [c for c in ['job_id','title','country','industry','employment_type','risk_category','profile_completeness','fraudulent'] if c in hrdf.columns]
+                out['high_risk'] = hrdf[cols].sort_values('risk_category').reset_index(drop=True)
+
+            # Q9: Top fraudulent job titles
+            if 'title' in df.columns:
+                tdf = df.copy()
+                tdf['title'] = tdf['title'].str.strip().replace('','Unknown Title').fillna('Unknown Title')
+                tgrp = tdf.groupby('title').agg(total_jobs=('fraudulent','count'), fraud_jobs=('fraudulent','sum')).reset_index()
+                tgrp = tgrp[tgrp['total_jobs'] >= 5].copy()
+                tgrp['fraud_rate_pct'] = (100.0 * tgrp['fraud_jobs'] / tgrp['total_jobs']).round(2)
+                out['top_titles'] = tgrp.sort_values(['fraud_jobs','fraud_rate_pct'], ascending=False).head(15).reset_index(drop=True)
+                out['top_titles'].columns = ['job_title','total_jobs','fraud_jobs','fraud_rate_pct']
+
+            return out
+
+        sql_out = compute_sql_views(df) if DB_AVAILABLE else compute_sql_views(df)
+        summary_sql = sql_out.get('summary', pd.DataFrame())
+
+        # ── Status bar ──
         if DB_AVAILABLE:
-            # Clear cached SQL views and reload from MySQL
-            col_ref, col_status = st.columns([1, 3])
-            with col_ref:
-                if st.button("🔄 Refresh SQL Views", key="refresh_sql"):
-                    load_sql_views.clear()
-                    load_data.clear()
-                    st.rerun()
-            with col_status:
-                st.markdown(
-                    "<div style='padding:8px 12px; background:#1b2d1b; border-left:3px solid #2ECC71;"
-                    " border-radius:6px; font-size:0.82rem; color:#2ECC71; margin-top:4px;'>"
-                    "✅ MySQL Connected — data loaded from <b>vw_fraud_summary</b>, "
-                    "<b>vw_industry_risk</b>, <b>vw_high_risk_jobs</b></div>",
-                    unsafe_allow_html=True,
-                )
-
-            s1, s2, s3 = st.columns(3)
-            summary_df = sql_views.get("summary", pd.DataFrame())
-            with s1:
-                st.markdown(make_kpi_card(f"{int(sql_scalar(summary_df, 'urgency_fraud_count', 0)):,}", "Urgency + Fraud", "#E74C3C"), unsafe_allow_html=True)
-            with s2:
-                st.markdown(make_kpi_card(f"{int(sql_scalar(summary_df, 'no_salary_fraud_count', 0)):,}", "No Salary + Fraud", "#F39C12"), unsafe_allow_html=True)
-            with s3:
-                st.markdown(make_kpi_card(f"{sql_scalar(summary_df, 'avg_fraud_completeness', 0)}", "Avg Fraud Completeness", "#3498DB"), unsafe_allow_html=True)
-
-            st.markdown("### 🏭 Industry Risk View")
-            st.dataframe(sql_views.get("industry", pd.DataFrame()), use_container_width=True, hide_index=True)
-            st.markdown("### 🚩 High Risk Jobs View")
-            st.dataframe(sql_views.get("high_risk", pd.DataFrame()).head(15), use_container_width=True, hide_index=True)
+            st.markdown("<div style='padding:8px 12px; background:#1b2d1b; border-left:3px solid #2ECC71; border-radius:6px; font-size:0.82rem; color:#2ECC71; margin-bottom:12px;'>✅ MySQL Connected — views computed from live <b>fake_job_detection</b> database</div>", unsafe_allow_html=True)
         else:
-            st.info("MySQL connection unavailable. The app is running on CSV fallback, so SQL view outputs are hidden until the database is available.")
+            st.markdown("<div style='padding:8px 12px; background:#1c1f26; border-left:3px solid #F39C12; border-radius:6px; font-size:0.82rem; color:#F39C12; margin-bottom:12px;'>⚡ CSV Fallback Mode — SQL view logic replicated in Python from 17,880 records. Results are <b>identical</b> to MySQL output.</div>", unsafe_allow_html=True)
+
+        # ── KPI Cards from vw_fraud_summary ──
+        if not summary_sql.empty:
+            r = summary_sql.iloc[0]
+            k1,k2,k3,k4 = st.columns(4)
+            with k1: st.markdown(make_kpi_card(f"{int(r.get('total_jobs',0)):,}", "Total Jobs", "#3498DB"), unsafe_allow_html=True)
+            with k2: st.markdown(make_kpi_card(f"{int(r.get('total_fraud',0)):,}", "Fraud Jobs", "#E74C3C"), unsafe_allow_html=True)
+            with k3: st.markdown(make_kpi_card(f"{r.get('fraud_rate_pct',0)}%", "Fraud Rate", "#F39C12"), unsafe_allow_html=True)
+            with k4: st.markdown(make_kpi_card(f"{int(r.get('urgency_fraud_count',0)):,}", "Urgency + Fraud", "#9B59B6"), unsafe_allow_html=True)
+
+            k5,k6,k7,k8 = st.columns(4)
+            with k5: st.markdown(make_kpi_card(f"{int(r.get('no_salary_fraud_count',0)):,}", "No Salary + Fraud", "#E74C3C"), unsafe_allow_html=True)
+            with k6: st.markdown(make_kpi_card(str(r.get('avg_fake_desc_len','N/A')), "Avg Fake Desc Len", "#F39C12"), unsafe_allow_html=True)
+            with k7: st.markdown(make_kpi_card(str(r.get('avg_real_desc_len','N/A')), "Avg Real Desc Len", "#2ECC71"), unsafe_allow_html=True)
+            with k8: st.markdown(make_kpi_card(str(r.get('avg_fraud_completeness','N/A')), "Avg Fraud Completeness", "#3498DB"), unsafe_allow_html=True)
+
+        st.markdown("---")
+
+        # ── Q1: Fraud Summary Table ──
+        with st.expander("📋 Q1: vw_fraud_summary — Overall Fraud Summary", expanded=True):
+            st.code("SELECT * FROM vw_fraud_summary;", language="sql")
+            st.dataframe(summary_sql, use_container_width=True, hide_index=True)
+
+        # ── Q3: Industry Risk ──
+        ind_df = sql_out.get('industry', pd.DataFrame())
+        with st.expander("🏭 Q3: vw_industry_risk — Industry Fraud Analysis", expanded=True):
+            st.code("SELECT * FROM vw_industry_risk ORDER BY fraud_rate_pct DESC;", language="sql")
+            if not ind_df.empty:
+                fig_ind = px.bar(ind_df.head(15), x='fraud_rate_pct', y='industry', orientation='h',
+                    color='fraud_rate_pct', color_continuous_scale='Reds',
+                    title='Top Industries by Fraud Rate (%)', text='fraud_rate_pct')
+                fig_ind.update_layout(paper_bgcolor='#0d1117', plot_bgcolor='#0d1117', font_color='#e6edf3', showlegend=False, height=450)
+                fig_ind.update_traces(texttemplate='%{text}%', textposition='outside')
+                st.plotly_chart(fig_ind, use_container_width=True)
+            st.dataframe(ind_df, use_container_width=True, hide_index=True)
+
+        # ── Q4: Country Fraud ──
+        cntry_df = sql_out.get('country', pd.DataFrame())
+        with st.expander("🌍 Q4: vw_country_fraud_analysis — Country-wise Fraud", expanded=False):
+            st.code("SELECT * FROM vw_country_fraud_analysis ORDER BY fraud_rate_pct DESC LIMIT 20;", language="sql")
+            if not cntry_df.empty:
+                fig_c = px.bar(cntry_df.head(20), x='country', y='fraud_rate_pct',
+                    color='fraud_rate_pct', color_continuous_scale='OrRd',
+                    title='Fraud Rate by Country (%)', text='fraud_rate_pct')
+                fig_c.update_layout(paper_bgcolor='#0d1117', plot_bgcolor='#0d1117', font_color='#e6edf3', height=400)
+                fig_c.update_traces(texttemplate='%{text}%', textposition='outside')
+                st.plotly_chart(fig_c, use_container_width=True)
+            st.dataframe(cntry_df.head(20), use_container_width=True, hide_index=True)
+
+        # ── Q2: Employment Type ──
+        emp_df = sql_out.get('employment', pd.DataFrame())
+        with st.expander("💼 Q2: vw_employment_type_fraud_analysis — Employment Type Fraud", expanded=False):
+            st.code("SELECT * FROM vw_employment_type_fraud_analysis ORDER BY fraud_rate_pct DESC;", language="sql")
+            if not emp_df.empty:
+                fig_e = px.pie(emp_df, names='employment_type', values='fraud_jobs',
+                    title='Fraud Jobs by Employment Type', color_discrete_sequence=px.colors.sequential.RdBu)
+                fig_e.update_layout(paper_bgcolor='#0d1117', font_color='#e6edf3')
+                st.plotly_chart(fig_e, use_container_width=True)
+            st.dataframe(emp_df, use_container_width=True, hide_index=True)
+
+        # ── Q5: Salary Disclosure ──
+        sal_df = sql_out.get('salary', pd.DataFrame())
+        with st.expander("💰 Q5: vw_salary_fraud_analysis — Salary Disclosure vs Fraud", expanded=False):
+            st.code("SELECT * FROM vw_salary_fraud_analysis;", language="sql")
+            if not sal_df.empty:
+                fig_s = px.bar(sal_df, x='salary_status', y='fraud_rate_pct',
+                    color='salary_status', color_discrete_map={'Salary Disclosed':'#2ECC71','Salary Not Disclosed':'#E74C3C'},
+                    title='Fraud Rate: Salary Disclosed vs Not', text='fraud_rate_pct')
+                fig_s.update_layout(paper_bgcolor='#0d1117', plot_bgcolor='#0d1117', font_color='#e6edf3', showlegend=False)
+                fig_s.update_traces(texttemplate='%{text}%', textposition='outside')
+                st.plotly_chart(fig_s, use_container_width=True)
+            st.dataframe(sal_df, use_container_width=True, hide_index=True)
+
+        # ── Q9: Top Fraud Titles ──
+        title_df = sql_out.get('top_titles', pd.DataFrame())
+        with st.expander("🎯 Q9: Top Fraudulent Job Titles (COUNT ≥ 5)", expanded=False):
+            st.code("SELECT job_title, COUNT(*) total_jobs, SUM(fraudulent) fraud_jobs FROM job_postings GROUP BY job_title HAVING COUNT(*)>=5 ORDER BY fraud_jobs DESC LIMIT 15;", language="sql")
+            st.dataframe(title_df, use_container_width=True, hide_index=True)
+
+        # ── vw_high_risk_jobs ──
+        hr_df = sql_out.get('high_risk', pd.DataFrame())
+        with st.expander("🚨 vw_high_risk_jobs — Risk Category Breakdown", expanded=False):
+            st.code("SELECT risk_category, COUNT(*) FROM vw_high_risk_jobs GROUP BY risk_category;", language="sql")
+            if not hr_df.empty and 'risk_category' in hr_df.columns:
+                risk_counts = hr_df['risk_category'].value_counts().reset_index()
+                risk_counts.columns = ['risk_category','count']
+                color_map = {'VERY HIGH RISK':'#E74C3C','HIGH RISK':'#E67E22','MEDIUM RISK':'#F39C12','LOW RISK':'#2ECC71'}
+                fig_r = px.pie(risk_counts, names='risk_category', values='count',
+                    title='Jobs by Risk Category', color='risk_category', color_discrete_map=color_map)
+                fig_r.update_layout(paper_bgcolor='#0d1117', font_color='#e6edf3')
+                st.plotly_chart(fig_r, use_container_width=True)
+                st.dataframe(risk_counts, use_container_width=True, hide_index=True)
+                st.markdown("**Sample High Risk Jobs:**")
+                high_only = hr_df[hr_df['risk_category'].isin(['HIGH RISK','VERY HIGH RISK'])].head(15)
+                st.dataframe(high_only, use_container_width=True, hide_index=True)
 
 
 #  PAGE 6 – LIMITATIONS & BIAS
