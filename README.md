@@ -914,22 +914,6 @@ A: Try these:
 
 ---
 
-## 🎓 Learning Resources
-
-### For Beginners
-
-- [Python for Data Science](https://www.coursera.org/learn/python-for-data-science)
-- [Machine Learning Basics](https://www.coursera.org/learn/machine-learning)
-- [Streamlit Tutorial](https://docs.streamlit.io/library/get-started)
-- [MySQL Beginners Guide](https://dev.mysql.com/doc/refman/8.0/en/tutorial.html)
-
-### Advanced Topics
-
-- [Imbalanced Classification](https://machinelearningmastery.com/imbalanced-classification-with-python/)
-- [Natural Language Processing](https://www.coursera.org/learn/natural-language-processing)
-- [SHAP for ML Explainability](https://shap.readthedocs.io/en/latest/example_notebooks/overviews/An%20introduction%20to%20explainable%20AI%20with%20Shapley%20values.html)
-- [SQL Analytics Patterns](https://mode.com/sql-tutorial/)
-
 ---
 
 <div align="center">
