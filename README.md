@@ -43,14 +43,14 @@ The notebook trains and exports the ML pipeline → the clean CSV is loaded into
 
 ### 🌟 Why Choose This System?
 
-- ✅ **17,880+ Job Postings** analyzed (Kaggle Fake Job Postings dataset)
-- ✅ **AI-Powered Fraud Detection** — TF-IDF + ML classifier with calibrated probabilities
-- ✅ **End-to-End SQL Workflow** — Notebook → Clean CSV → MySQL → SQL Views → Streamlit
-- ✅ **6 Pre-built SQL Views** for industry, country, salary, and employment risk
-- ✅ **Explainable AI** — SHAP values + top TF-IDF keywords driving each prediction
-- ✅ **Beautiful Dark UI** — GitHub-inspired theme with KPI cards
-- ✅ **Real-Time Job Checker** — Paste any posting and get a fraud probability score
-- ✅ **Bias & Limitations Reporting** — Honest documentation of model weaknesses
+-  **17,880+ Job Postings** analyzed (Kaggle Fake Job Postings dataset)
+-  **AI-Powered Fraud Detection** — TF-IDF + ML classifier with calibrated probabilities
+-  **End-to-End SQL Workflow** — Notebook → Clean CSV → MySQL → SQL Views → Streamlit
+-  **6 Pre-built SQL Views** for industry, country, salary, and employment risk
+-  **Explainable AI** — SHAP values + top TF-IDF keywords driving each prediction
+-  **Beautiful Dark UI** — GitHub-inspired theme with KPI cards
+-  **Real-Time Job Checker** — Paste any posting and get a fraud probability score
+-  **Bias & Limitations Reporting** — Honest documentation of model weaknesses
 
 ---
 
