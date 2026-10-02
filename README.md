@@ -21,7 +21,7 @@
 - [Introduction](#-introduction)
 - [Features](#-features)
 - [Tech Stack](#️-tech-stack)
-- [Installation](#-installation)
+- [Installation](#-installation) 
 - [Configuration](#️-configuration)
 - [Usage](#-usage)
 - [How It Works](#-how-it-works)
