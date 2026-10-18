@@ -5,7 +5,7 @@
 ![Python](https://img.shields.io/badge/Python-3.9+-blue.svg)
 ![Streamlit](https://img.shields.io/badge/Streamlit-1.25+-red.svg)  
 ![MySQL](https://img.shields.io/badge/MySQL-8.0+-orange.svg)
-![Scikit-Learn](https://img.shields.io/badge/Scikit--Learn-1.1+-yellow.svg)
+![Scikit-Learn](https://img.shields.io/badge/Scikit--Learn-1.1+-yellow.svg)   
 ![Status](https://img.shields.io/badge/Status-Active-success.svg)
 
 **An End-to-End SQL Analytics + Machine Learning Pipeline that detects fraudulent job postings and analyzes the global hiring market**
