@@ -1,5 +1,5 @@
 # 🛡️ Fake Job Detection & Hiring Market Analysis
-
+ 
 <div align="center">
 
 ![Python](https://img.shields.io/badge/Python-3.9+-blue.svg)
